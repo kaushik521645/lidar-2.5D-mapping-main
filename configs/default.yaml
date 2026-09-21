@@ -1,0 +1,96 @@
+# ==============================================================================
+# FoveaMap: Central Configuration
+# Single source of truth for all tunable constants in the perception pipeline.
+# ==============================================================================
+
+grid:
+  # Static Resolution Tiers: list of [max_range_m, cell_size_m]
+  resolution_tiers:
+    - [10.0, 0.05]   # Tier 0: < 10m  -> 5cm (fine / critical safety zone)
+    - [30.0, 0.15]   # Tier 1: < 30m  -> 15cm (medium / mid-range zone)
+    - [100.0, 0.50]  # Tier 2: < 100m -> 50cm (coarse / far-field zone)
+
+  max_range_m: 100.0
+  min_range_m: 0.5
+  roof_height_m: 2.5
+  overhang_gap_threshold_m: 0.5
+  hysteresis_margin_m: 0.5
+  min_points_per_ring_sector: 3
+
+foveation:
+  base_fine_radius_m: 10.0   # Base radius of Tier 0 when stationary
+  max_stretch: 2.5           # Max forward elongation factor at speed
+  stretch_speed_ref_mps: 20.0 # Speed (m/s) at which stretch reaches max_stretch (~72 km/h)
+  shear_strength: 0.6        # Lateral shear sensitivity to steering angle (0.0 - 1.0)
+
+perception:
+  # 4-Class Taxonomy:
+  # 0: Drivable Terrain
+  # 1: Non-Drivable Terrain
+  # 2: Static Obstacle
+  # 3: Dynamic Object
+  # -1: Unknown / Unclassified
+  class_names:
+    0: "Drivable Terrain"
+    1: "Non-Drivable Terrain"
+    2: "Static Obstacle"
+    3: "Dynamic Object"
+    -1: "Unknown"
+
+  class_colors_hex:
+    0: "#22c55e"  # Green
+    1: "#f59e0b"  # Amber / Orange
+    2: "#ef4444"  # Red
+    3: "#3b82f6"  # Blue / Cyan
+    -1: "#6b7280" # Gray
+
+  # Heuristic fallback: lateral road corridor half-width (meters)
+  road_half_width_m: 4.2
+
+  # SemanticKITTI raw label ID -> 4-class taxonomy collapse
+  semantickitti_to_4class:
+    0: -1     # "unlabeled"
+    1: -1     # "outlier"
+    10: 3     # "car" -> Dynamic Object
+    11: 3     # "bicycle" -> Dynamic Object
+    13: 3     # "bus" -> Dynamic Object
+    15: 3     # "motorcycle" -> Dynamic Object
+    16: 3     # "on-rails" -> Dynamic Object
+    18: 3     # "truck" -> Dynamic Object
+    20: 3     # "other-vehicle" -> Dynamic Object
+    30: 3     # "person" -> Dynamic Object
+    31: 3     # "bicyclist" -> Dynamic Object
+    32: 3     # "motorcyclist" -> Dynamic Object
+    40: 0     # "road" -> Drivable Terrain
+    44: 0     # "parking" -> Drivable Terrain
+    48: 1     # "sidewalk" -> Non-Drivable Terrain
+    49: 0     # "other-ground" -> Drivable Terrain
+    50: 2     # "building" -> Static Obstacle
+    51: 2     # "fence" -> Static Obstacle
+    52: 2     # "other-structure" -> Static Obstacle
+    60: 0     # "lane-marking" -> Drivable Terrain
+    70: 1     # "vegetation" -> Non-Drivable Terrain
+    71: 2     # "trunk" -> Static Obstacle
+    72: 1     # "terrain" -> Non-Drivable Terrain
+    80: 2     # "pole" -> Static Obstacle
+    81: 2     # "traffic-sign" -> Static Obstacle
+    99: 1     # "other-object" -> Non-Drivable Terrain
+    252: 3    # "moving-car" -> Dynamic Object
+    253: 3    # "moving-bicyclist" -> Dynamic Object
+    254: 3    # "moving-person" -> Dynamic Object
+    255: 3    # "moving-motorcyclist" -> Dynamic Object
+    256: 3    # "moving-on-rails" -> Dynamic Object
+    257: 3    # "moving-bus" -> Dynamic Object
+    258: 3    # "moving-truck" -> Dynamic Object
+    259: 3    # "moving-other-vehicle" -> Dynamic Object
+
+tracking:
+  max_coast_frames: 5
+  distance_gate_m: 2.0
+  dt_s: 0.1
+  ttc_refine_threshold_s: 3.0
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  export_dir: "data/precomputed"

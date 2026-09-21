@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FoveaMap: Foveated 3D→2.5D LiDAR Perception Dashboard</title>
+  <link rel="stylesheet" href="css/style.css?v=1.0.2">
+  <!-- Google Fonts: Inter and JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+  <!-- Three.js and OrbitControls (single CDN source) -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <!-- Pako for Zlib WebSocket Decompression -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+</head>
+<body>
+
+  <!-- Global Ambient Glowing Progress Strip -->
+  <div id="global-progress-bar" class="global-progress-bar active shimmer" style="width: 20%;"></div>
+
+  <!-- Top Navbar -->
+  <header class="navbar">
+    <div class="brand">
+      <div class="brand-icon">FM</div>
+      <div class="brand-title">FOVEAMAP <span style="font-weight:400; color:var(--text-secondary); font-size:14px;">| Foveated 2.5D LiDAR Perception</span></div>
+      <span class="badge-tag">v1.0.0</span>
+    </div>
+
+    <div class="header-status">
+      <div class="status-item">
+        <div id="ws-status-dot" class="status-dot"></div>
+        <span>Pipeline Active</span>
+      </div>
+      <div class="status-item">
+        <span style="color:var(--accent-cyan); font-family:var(--font-mono); font-weight:700;">4-Class Taxonomy</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main 3-Column Layout -->
+  <main class="main-container">
+
+    <!-- Left Controls Sidebar -->
+    <aside class="sidebar">
+
+      <!-- Scenario Selection Panel -->
+      <section class="panel-section">
+        <div class="section-header">
+          <span>Scenario Selection</span>
+        </div>
+        <div class="control-group">
+          <label class="control-label-row" for="select-scenario">
+            <span>Active Scene</span>
+          </label>
+          <select id="select-scenario">
+            <optgroup label="Genuine KITTI Odometry (Real Velodyne HDL-64E, Sequences 00-21)">
+              <option value="kitti_seq_00" selected>KITTI Sequence 00 (4,541 scans)</option>
+              <option value="kitti_seq_01">KITTI Sequence 01 (1,101 scans)</option>
+              <option value="kitti_seq_02">KITTI Sequence 02 (4,661 scans)</option>
+              <option value="kitti_seq_03">KITTI Sequence 03 (801 scans)</option>
+              <option value="kitti_seq_04">KITTI Sequence 04 (271 scans)</option>
+              <option value="kitti_seq_05">KITTI Sequence 05 (2,761 scans)</option>
+              <option value="kitti_seq_06">KITTI Sequence 06 (1,101 scans)</option>
+              <option value="kitti_seq_07">KITTI Sequence 07 (1,101 scans)</option>
+              <option value="kitti_seq_08">KITTI Sequence 08 (4,071 scans)</option>
+              <option value="kitti_seq_09">KITTI Sequence 09 (1,591 scans)</option>
+              <option value="kitti_seq_10">KITTI Sequence 10 (1,201 scans)</option>
+              <option value="kitti_seq_11">KITTI Sequence 11 (921 scans)</option>
+              <option value="kitti_seq_12">KITTI Sequence 12 (1,061 scans)</option>
+              <option value="kitti_seq_13">KITTI Sequence 13 (3,281 scans)</option>
+              <option value="kitti_seq_14">KITTI Sequence 14 (631 scans)</option>
+              <option value="kitti_seq_15">KITTI Sequence 15 (1,901 scans)</option>
+              <option value="kitti_seq_16">KITTI Sequence 16 (1,731 scans)</option>
+              <option value="kitti_seq_17">KITTI Sequence 17 (491 scans)</option>
+              <option value="kitti_seq_18">KITTI Sequence 18 (1,801 scans)</option>
+              <option value="kitti_seq_19">KITTI Sequence 19 (4,981 scans)</option>
+              <option value="kitti_seq_20">KITTI Sequence 20 (831 scans)</option>
+              <option value="kitti_seq_21">KITTI Sequence 21 (2,721 scans)</option>
+            </optgroup>
+            <optgroup label="SemanticKITTI Benchmark (Ground-Truth Labeled Sequence)">
+              <option value="synthetic_kitti_like">SemanticKITTI 30-Frame Sequence (Ground-Truth Labeled)</option>
+            </optgroup>
+            <optgroup label="Procedural Simulation Scenarios (Dynamic Foveation & Hazards)">
+              <option value="urban_intersection">Urban Intersection (Cross-Traffic & Turning Ego)</option>
+              <option value="highway_cruise">Highway Cruise (22 m/s Forward Foveation)</option>
+              <option value="pothole_alley">Pothole & Rough Terrain Alley (Negative Obstacles)</option>
+              <option value="bridge_overpass">Bridge Overpass (Multi-Layer Overhead Structure)</option>
+            </optgroup>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label class="control-label-row" for="select-mode">
+            <span>Stream Mode</span>
+          </label>
+          <select id="select-mode">
+            <option value="precomputed" selected>Precomputed JSON (Deterministic)</option>
+            <option value="live_ws">Live WebSocket Stream (Real-Time)</option>
+          </select>
+        </div>
+
+        <p id="lbl-scenario-desc" style="font-size:11px; color:var(--text-secondary); line-height:1.4;">
+          Loading scenario description...
+        </p>
+
+        <!-- Mini Progress / Cache Status Indicator -->
+        <div class="sidebar-progress-container">
+          <div class="sidebar-progress-header">
+            <span style="color:var(--text-secondary); font-size:10px;">DATASET STATUS</span>
+            <span id="badge-scenario-status" class="badge-status ready">READY</span>
+          </div>
+          <div class="sidebar-progress-bar">
+            <div id="sidebar-progress-fill" class="sidebar-progress-fill" style="width: 100%;"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Playback Controls -->
+      <section class="panel-section">
+        <div class="section-header">
+          <span>Playback Controls</span>
+          <span id="lbl-frame-counter" style="font-family:var(--font-mono); font-size:11px; color:var(--accent-cyan);">Frame 1 / 30</span>
+        </div>
+
+        <div class="playback-bar">
+          <button id="btn-play" class="btn btn-primary">⏸ Pause</button>
+          <button id="btn-step" class="btn">⏭ Step</button>
+          <button id="btn-reset" class="btn">↺ Reset</button>
+        </div>
+
+        <div class="scrub-container">
+          <input type="range" id="slider-scrub" min="0" max="29" value="0">
+        </div>
+      </section>
+
+      <!-- Dynamic Foveation Live Sliders -->
+      <section class="panel-section">
+        <div class="section-header">
+          <span>Dynamic Foveation Sliders</span>
+        </div>
+
+        <!-- Speed Slider -->
+        <div class="control-group">
+          <div class="control-label-row">
+            <label for="slider-speed">Vehicle Speed</label>
+            <span id="val-speed" class="control-value">8.0 m/s</span>
+          </div>
+          <input type="range" id="slider-speed" min="0" max="30" step="0.5" value="8.0">
+        </div>
+
+        <!-- Steering Slider -->
+        <div class="control-group">
+          <div class="control-label-row">
+            <label for="slider-steering">Steering Angle</label>
+            <span id="val-steering" class="control-value">0°</span>
+          </div>
+          <input type="range" id="slider-steering" min="-45" max="45" step="1" value="0">
+        </div>
+
+        <!-- Max Stretch Slider -->
+        <div class="control-group">
+          <div class="control-label-row">
+            <label for="slider-max-stretch">Max Forward Stretch</label>
+            <span id="val-max-stretch" class="control-value">2.5x</span>
+          </div>
+          <input type="range" id="slider-max-stretch" min="1.0" max="3.5" step="0.1" value="2.5">
+        </div>
+
+        <!-- (Shear Strength removed in favor of True Elliptical Kinematics) -->
+
+        <!-- Base Fine Radius Slider -->
+        <div class="control-group">
+          <div class="control-label-row">
+            <label for="slider-base-radius">Base Fine Radius</label>
+            <span id="val-base-radius" class="control-value">10.0 m</span>
+          </div>
+          <input type="range" id="slider-base-radius" min="5.0" max="25.0" step="1.0" value="10.0">
+        </div>
+      </section>
+
+    </aside>
+
+    <!-- Center 3D Viewport -->
+    <main class="viewport-center">
+      <div id="canvas3d"></div>
+
+      <!-- Viewport Top Active Glowing Loading Strip -->
+      <div id="viewport-progress-strip" class="viewport-progress-strip active">
+        <div class="viewport-progress-track">
+          <div id="viewport-progress-fill" class="viewport-progress-fill" style="width: 25%;"></div>
+        </div>
+        <div class="viewport-progress-label">
+          <span id="viewport-progress-status">INITIALIZING PIPELINE &amp; DATASET...</span>
+          <span id="viewport-progress-pct">25%</span>
+        </div>
+      </div>
+
+      <!-- Floating HUD Toast Notifications -->
+      <div id="hud-toast-container" class="hud-toast-container"></div>
+
+      <!-- Central Viewport Loading & Processing Overlay -->
+      <div id="viewport-loader-overlay" class="viewport-loader-overlay active">
+        <div class="loader-modal">
+          <div class="lidar-radar-scanner">
+            <div class="radar-ring"></div>
+            <div class="radar-ring"></div>
+            <div class="radar-ring"></div>
+            <div class="radar-sweep"></div>
+            <div class="radar-center-dot"></div>
+          </div>
+
+          <div id="loader-title" class="loader-title">PROCESSING 2.5D LIDAR POINT CLOUD</div>
+          <div id="loader-subtitle" class="loader-subtitle">KITTI Odometry Sequence 00 · 4,541 Scans</div>
+
+          <div class="loader-progress-section">
+            <div class="loader-progress-labels">
+              <span id="loader-status-text" class="loader-status-text">Ingesting raw Velodyne scans...</span>
+              <span id="loader-percent-text" class="loader-percent-text">0%</span>
+            </div>
+            <div class="loader-progress-track">
+              <div id="loader-progress-fill" class="loader-progress-fill"></div>
+            </div>
+          </div>
+
+          <div class="loader-stages-list">
+            <div class="loader-stage-item active">
+              <span class="stage-icon">1</span>
+              <span>Reading Velodyne binary scans (.bin)</span>
+            </div>
+            <div class="loader-stage-item">
+              <span class="stage-icon">2</span>
+              <span>Estimating RANSAC ground surface</span>
+            </div>
+            <div class="loader-stage-item">
+              <span class="stage-icon">3</span>
+              <span>Binning multi-resolution 2.5D polar grid</span>
+            </div>
+            <div class="loader-stage-item">
+              <span class="stage-icon">4</span>
+              <span>Updating Kalman multi-object tracker</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Viewport Top HUD Controls -->
+      <div class="hud-overlay-top">
+        <div class="hud-pill">
+          <span style="color:var(--text-secondary);">Camera:</span>
+          <button id="btn-view-perspective" class="btn" style="padding:4px 8px; font-size:11px;">3D View</button>
+          <button id="btn-view-topdown" class="btn" style="padding:4px 8px; font-size:11px;">Bird's Eye (2D)</button>
+          <button id="btn-view-cockpit" class="btn" style="padding:4px 8px; font-size:11px;">Cockpit</button>
+        </div>
+
+        <div class="hud-pill">
+          <span style="color:var(--accent-cyan);">Cyan Contour:</span>
+          <span style="font-size:11px; color:var(--text-secondary);">Live Foveation Boundary (Tier 0: 5cm)</span>
+        </div>
+      </div>
+
+      <!-- Bottom Semantic Class Legend -->
+      <div class="legend-bar">
+        <div class="legend-item">
+          <div class="legend-color" style="background-color:#22c55e;"></div>
+          <span>Drivable Terrain (0)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background-color:#f59e0b;"></div>
+          <span>Non-Drivable Terrain / Curbs (1)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background-color:#ef4444;"></div>
+          <span>Static Obstacle / Overhang (2)</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-color" style="background-color:#3b82f6;"></div>
+          <span>Dynamic Object (3)</span>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right Telemetry & Metrics Sidebar -->
+    <aside class="telemetry-sidebar">
+
+      <!-- Memory Reduction Card -->
+      <div class="metric-card">
+        <div class="metric-title">MEMORY SAVINGS VS UNIFORM 5CM GRID</div>
+        <div class="metric-hero">
+          <span id="val-mem-savings" class="metric-number metric-highlight-green">89.4%</span>
+          <span class="metric-unit">REDUCTION</span>
+        </div>
+        <div class="mem-bar-container">
+          <div class="mem-bar-track">
+            <div id="mem-bar-fill" class="mem-bar-fill" style="width: 89.4%;"></div>
+          </div>
+          <div class="mem-labels">
+            <span>FoveaMap: <b id="val-mem-fovea" style="color:var(--accent-green);">124 KB</b></span>
+            <span>Uniform 5cm: <b id="val-mem-uniform" style="color:var(--text-muted);">1,280 KB</b></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Latency & FPS Card -->
+      <div class="metric-card">
+        <div class="metric-title">END-TO-END PIPELINE PERFORMANCE</div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:4px;">
+          <div>
+            <span style="font-size:11px; color:var(--text-muted);">THROUGHPUT</span>
+            <div class="metric-hero">
+              <span id="val-fps" class="metric-number metric-highlight-cyan">34.8</span>
+              <span class="metric-unit">FPS</span>
+            </div>
+          </div>
+          <div>
+            <span style="font-size:11px; color:var(--text-muted);">LATENCY</span>
+            <div class="metric-hero">
+              <span id="val-latency" class="metric-number">28.7</span>
+              <span class="metric-unit">ms</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Ghosting Elimination & Active Cells -->
+      <div class="metric-card">
+        <div class="metric-title">TRACKING & ACTIVE FOOTPRINT ERASURE</div>
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:4px;">
+          <div>
+            <span style="font-size:11px; color:var(--text-muted);">GHOST CELLS ERASED</span>
+            <div class="metric-hero">
+              <span id="val-ghosting-erased" class="metric-number" style="color:var(--accent-purple);">18</span>
+            </div>
+          </div>
+          <div>
+            <span style="font-size:11px; color:var(--text-muted);">ACTIVE CELLS</span>
+            <div class="metric-hero">
+              <span id="val-active-cells" class="metric-number">1,420</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Track Table -->
+      <div class="metric-card" style="flex:1;">
+        <div class="metric-title">ACTIVE TRACKED OBJECTS (KALMAN)</div>
+        <div style="overflow-y:auto; max-height:220px; margin-top:6px;">
+          <table class="track-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>POS (X,Y)</th>
+                <th>VELOCITY</th>
+                <th>CLASS</th>
+              </tr>
+            </thead>
+            <tbody id="tracks-table-body">
+              <tr><td colspan="4" style="color:var(--text-muted); text-align:center;">Scanning...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </aside>
+
+  </main>
+
+  <!-- Application Scripts -->
+  <script src="js/polar_grid.js?v=1.0.2"></script>
+  <script src="js/renderer3d.js?v=1.0.2"></script>
+  <script src="js/metrics_charts.js?v=1.0.2"></script>
+  <script src="js/loader.js?v=1.0.2"></script>
+  <script src="js/scenarios.js?v=1.0.2"></script>
+  <script src="js/app.js?v=1.0.2"></script>
+</body>
+</html>

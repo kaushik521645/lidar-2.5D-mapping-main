@@ -1,0 +1,54 @@
+# Multi-resolution radial tiers: [max_range_m, cell_size_m], evaluated in order
+resolution_tiers:
+  - [10.0, 0.05]
+  - [30.0, 0.15]
+  - [100.0, 0.50]
+
+# Kinematic-adaptive foveation zone constants
+foveation:
+  base_fine_radius_m: 10.0
+  max_stretch: 2.5
+  stretch_speed_ref_mps: 20.0
+  shear_strength: 0.6
+
+# Polar grid construction parameters
+grid:
+  roof_height_m: 2.5
+  overhang_gap_threshold_m: 0.5
+  hysteresis_margin_m: 0.5
+  min_points_per_sector: 3
+
+# SemanticKITTI raw ID -> collapsed 3-class taxonomy (0=Terrain, 1=Static Obstacle, 2=Dynamic Object, -1=ignore)
+class_map:
+  0: -1      # unlabeled
+  1: -1      # outlier
+  10: 2      # car -> Dynamic Object
+  11: 2      # bicycle -> Dynamic Object
+  13: 2      # bus -> Dynamic Object
+  15: 2      # motorcycle -> Dynamic Object
+  18: 2      # truck -> Dynamic Object
+  20: 2      # other-vehicle -> Dynamic Object
+  30: 2      # person -> Dynamic Object
+  31: 2      # bicyclist -> Dynamic Object
+  32: 2      # motorcyclist -> Dynamic Object
+  40: 0      # road -> Terrain
+  44: 0      # parking -> Terrain
+  48: 0      # sidewalk -> Terrain
+  49: 0      # other-ground -> Terrain
+  50: 1      # building -> Static Obstacle
+  51: 1      # fence -> Static Obstacle
+  52: 1      # other-structure -> Static Obstacle
+  60: 0      # lane-marking -> Terrain
+  70: 0      # vegetation -> Terrain
+  71: 1      # trunk -> Static Obstacle
+  72: 0      # terrain -> Terrain
+  80: 1      # pole -> Static Obstacle
+  81: 1      # traffic-sign -> Static Obstacle
+  99: 1      # other-object -> Static Obstacle
+  252: 2     # moving-car -> Dynamic Object
+  253: 2     # moving-bicyclist -> Dynamic Object
+  254: 2     # moving-person -> Dynamic Object
+  255: 2     # moving-motorcyclist -> Dynamic Object
+  256: 2     # moving-bus -> Dynamic Object
+  257: 2     # moving-truck -> Dynamic Object
+  258: 2     # moving-other-vehicle -> Dynamic Object
