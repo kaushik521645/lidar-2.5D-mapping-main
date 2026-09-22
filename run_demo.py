@@ -2,8 +2,9 @@
 FoveaMap One-Command Demo Launcher.
 
 Usage:
-  python run_demo.py                  # Launches server with sequence 00 and opens dashboard
-  python run_demo.py -s 04            # Launches server with KITTI sequence 04
+  python run_demo.py                  # Launches server with continuous auto-looping across all sequences
+  python run_demo.py -s 04            # Launches server starting with KITTI sequence 04
+  python run_demo.py --no-auto-loop   # Replays only the single specified sequence in loop
   python run_demo.py --all-sequences  # Precomputes frames for all 22 sequences in dataset
   python run_demo.py --eval           # Runs evaluation and benchmarks report
   python run_demo.py --export         # Recomputes and exports scenario JSONs
@@ -28,6 +29,7 @@ from src.metrics.evaluator import run_full_evaluation
 def main():
     parser = argparse.ArgumentParser(description="FoveaMap Perception Dashboard Runner")
     parser.add_argument("--sequence", type=str, default="00", help="KITTI Sequence to load (e.g. 00, 01, ..., 21)")
+    parser.add_argument("--no-auto-loop", action="store_true", help="Disable automatic sequence looping")
     parser.add_argument("--all-sequences", action="store_true", help="Precompute frames for all available sequences in dataset")
     parser.add_argument("--eval", action="store_true", help="Run full evaluation and print report")
     parser.add_argument("--export", action="store_true", help="Re-export precomputed scenario JSONs")
@@ -92,7 +94,9 @@ def main():
     print(f"      WebSocket API   : ws://localhost:{args.port}/ws/grid")
     print(f"      REST Health     : http://localhost:{args.port}/health")
     print(f"      Active Dataset  : {os.path.basename(kitti_loader.dataset_path)}")
+    auto_loop_mode = "DISABLED (Single Sequence Repeat)" if args.no_auto_loop else "ENABLED (Continuous Playlist across all sequences)"
     print(f"      Active Sequence : Sequence {active_seq} ({len(kitti_loader)} scans)")
+    print(f"      Auto-Loop Mode  : {auto_loop_mode}")
     print(f"      Sequences Loaded: {len(available_seqs)} available ({available_seqs[0]} to {available_seqs[-1]})")
     print("=" * 70 + "\n")
 

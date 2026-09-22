@@ -92,6 +92,8 @@ def get_all_kitti_sequences() -> List[Dict[str, Any]]:
     for s in seq_ids:
         loader.set_sequence(s)
         cnt = len(loader)
+        cache_p = os.path.join(PRECOMPUTED_DIR, f"kitti_seq_{s}.json")
+        is_precomp = os.path.exists(cache_p) or (s == "00" and os.path.exists(os.path.join(PRECOMPUTED_DIR, "kitti_odometry.json")))
         result.append({
             "id": f"kitti_seq_{s}",
             "sequence": s,
@@ -99,6 +101,7 @@ def get_all_kitti_sequences() -> List[Dict[str, Any]]:
             "description": f"Real Velodyne HDL-64E LiDAR capture from KITTI odometry sequence {s} ({cnt:,} raw scans).",
             "type": "real",
             "scans_count": cnt,
+            "is_precomputed": is_precomp,
         })
     _cached_kitti_seqs = result
     return result
@@ -133,30 +136,35 @@ async def list_scenarios():
             "description": "30-frame sequential LiDAR dataset in SemanticKITTI format with ground-truth semantic point annotations.",
             "type": "semantickitti",
             "scans_count": 30,
+            "is_precomputed": os.path.exists(os.path.join(PRECOMPUTED_DIR, "synthetic_kitti_like.json")),
         },
         {
             "id": "urban_intersection",
             "name": "Urban Intersection",
             "description": "Dense cross-traffic, crossing pedestrian, roadside curbs, and turning ego vehicle.",
             "type": "synthetic",
+            "is_precomputed": os.path.exists(os.path.join(PRECOMPUTED_DIR, "urban_intersection.json")),
         },
         {
             "id": "highway_cruise",
             "name": "Highway Cruise (22 m/s)",
             "description": "High-speed cruising with active forward foveation elongation up to 25m.",
             "type": "synthetic",
+            "is_precomputed": os.path.exists(os.path.join(PRECOMPUTED_DIR, "highway_cruise.json")),
         },
         {
             "id": "pothole_alley",
             "name": "Pothole & Rough Terrain Alley",
             "description": "Distinguishes smooth drivable road (Class 0) from hazardous non-drivable potholes (Class 1).",
             "type": "synthetic",
+            "is_precomputed": os.path.exists(os.path.join(PRECOMPUTED_DIR, "pothole_alley.json")),
         },
         {
             "id": "bridge_overpass",
             "name": "Bridge Overpass",
             "description": "Multi-layer underpass: ground surface (z=-1.5m) and bridge deck ceiling (z=1.8 to 3.2m).",
             "type": "synthetic",
+            "is_precomputed": os.path.exists(os.path.join(PRECOMPUTED_DIR, "bridge_overpass.json")),
         },
     ]
     return JSONResponse(content=kitti_seqs + benchmarks_and_synthetic)
@@ -239,6 +247,7 @@ async def websocket_grid_stream(websocket: WebSocket):
 
     current_frame_idx = 0
     is_playing = True
+    auto_loop_all = True
     speed_mps = 10.0
     steering_rad = 0.0
     playback_fps = 10.0
@@ -307,6 +316,33 @@ async def websocket_grid_stream(websocket: WebSocket):
                         if new_frames:
                             frames = new_frames
 
+                elif cmd == "set_auto_loop":
+                    auto_loop_all = bool(msg.get("enabled", True))
+
+                elif cmd == "next_scenario":
+                    all_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
+                    if current_scenario in all_seq_ids:
+                        idx = all_seq_ids.index(current_scenario)
+                        current_scenario = all_seq_ids[(idx + 1) % len(all_seq_ids)]
+                    elif all_seq_ids:
+                        current_scenario = all_seq_ids[0]
+                    current_frame_idx = 0
+                    new_frames = load_scenario_frames(current_scenario)
+                    if new_frames:
+                        frames = new_frames
+
+                elif cmd == "prev_scenario":
+                    all_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
+                    if current_scenario in all_seq_ids:
+                        idx = all_seq_ids.index(current_scenario)
+                        current_scenario = all_seq_ids[(idx - 1 + len(all_seq_ids)) % len(all_seq_ids)]
+                    elif all_seq_ids:
+                        current_scenario = all_seq_ids[0]
+                    current_frame_idx = 0
+                    new_frames = load_scenario_frames(current_scenario)
+                    if new_frames:
+                        frames = new_frames
+
                 elif cmd == "set_params":
                     speed_mps = float(msg.get("speed_mps", speed_mps))
                     steering_rad = float(msg.get("steering_angle_rad", steering_rad))
@@ -327,6 +363,8 @@ async def websocket_grid_stream(websocket: WebSocket):
 
             if frames and len(frames) > 0:
                 frame_data = dict(frames[current_frame_idx])
+                frame_data["scenario_id"] = current_scenario
+
                 # Allow live speed/steering override
                 if user_override:
                     frame_data["vehicle_state"]["speed_mps"] = speed_mps
@@ -347,7 +385,20 @@ async def websocket_grid_stream(websocket: WebSocket):
                     await websocket.send_bytes(compressed)
 
                 if is_playing:
-                    current_frame_idx = (current_frame_idx + 1) % len(frames)
+                    if auto_loop_all and current_frame_idx >= len(frames) - 1:
+                        # Automatically advance to next KITTI sequence
+                        all_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
+                        if current_scenario in all_seq_ids:
+                            idx = all_seq_ids.index(current_scenario)
+                            current_scenario = all_seq_ids[(idx + 1) % len(all_seq_ids)]
+                        elif all_seq_ids:
+                            current_scenario = all_seq_ids[0]
+                        current_frame_idx = 0
+                        new_frames = load_scenario_frames(current_scenario)
+                        if new_frames:
+                            frames = new_frames
+                    else:
+                        current_frame_idx = (current_frame_idx + 1) % len(frames)
 
             await asyncio.sleep(1.0 / playback_fps)
 

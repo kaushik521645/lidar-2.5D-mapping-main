@@ -82,7 +82,19 @@ class PolarGridOverlay {
     this.gridGroup.add(this.foveaLine);
   }
 
-  updateFoveationContour(speed_mps, steering_angle_rad, base_radius = 10.0, max_stretch = 2.5, activeTracks = []) {
+  updateFoveationContour(
+    speed_mps,
+    steering_angle_rad,
+    base_radius = 10.0,
+    max_stretch = 2.5,
+    activeTracks = [],
+    motionFoveationEnabled = true,
+    motionSpeedThreshold = 0.8,
+    motionLeadTime = 1.0,
+    collisionFocusOnly = true,
+    corridorHalfWidthM = 3.2,
+    maxThreatDistanceM = 35.0
+  ) {
     if (!this.foveaLine) return;
 
     const segments = 120;
@@ -113,25 +125,92 @@ class PolarGridOverlay {
       // Piecewise: front half is ellipse, back half is base circle
       let r = is_forward ? r_ellipse : b;
 
-      // Add attention spikes
-      if (activeTracks && activeTracks.length > 0) {
+      // Dynamic collision-focused foveation lobes
+      if (motionFoveationEnabled && activeTracks && activeTracks.length > 0) {
         let r_attn = 0;
         activeTracks.forEach(track => {
-            if (track.class_id !== 3) return; // Only attend to dynamic obstacles
-            const tx = track.position_xy[0];
-            const ty = track.position_xy[1];
-            const tr = Math.hypot(tx, ty);
-            const ttheta = Math.atan2(ty, tx);
+          if (track.class_id !== 3) return; // Only dynamic obstacles
+          const tx = track.position_xy[0];
+          const ty = track.position_xy[1];
+          const tr = Math.hypot(tx, ty);
+          const ttheta = Math.atan2(ty, tx);
 
-            const width = track.bbox_size_xy ? Math.max(track.bbox_size_xy[0], track.bbox_size_xy[1]) : 4.0;
-            const sigma = Math.max(width / Math.max(tr, 1.0), 0.1);
+          const vel = track.velocity_xy || [0, 0];
+          const vx = vel[0] || 0;
+          const vy = vel[1] || 0;
+          const speed = Math.hypot(vx, vy);
+          const width = track.bbox_size_xy ? Math.max(track.bbox_size_xy[0], track.bbox_size_xy[1]) : 4.0;
 
-            let diff = theta - ttheta;
+          if (collisionFocusOnly) {
+            // Strictly focus only on oncoming / straight-on collision threats
+            if (tr > maxThreatDistanceM || tr < 0.5) return;
+
+            const closing_speed = -(tx * vx + ty * vy) / Math.max(tr, 0.1);
+            let is_threat = false;
+            let reach = 0.0;
+            let bearing = ttheta;
+
+            // Case A: Oncoming Traffic Ahead within roadway limits (|y| <= 5.5m) closing in
+            if (tx > 0.0 && Math.abs(ty) <= 5.5 && (closing_speed >= 0.5 || vx <= -0.5)) {
+              is_threat = true;
+              reach = Math.min(tr + 5.0, maxThreatDistanceM);
+              bearing = Math.atan2(ty, tx);
+            }
+            // Case B: Straight-On Obstacle in Direct Forward Travel Lane (|y| <= corridorHalfWidthM)
+            else if (tx > 0.0 && Math.abs(ty) <= corridorHalfWidthM) {
+              // Ignore if moving away
+              if (closing_speed >= -0.5 && vx <= 0.5 && tr <= 25.0) {
+                is_threat = true;
+                reach = Math.min(tr + 5.0, maxThreatDistanceM);
+                bearing = Math.atan2(ty, tx);
+              }
+            }
+            // Case C: Crossing Traffic entering ego corridor on collision course
+            else if (speed >= 0.8 && Math.abs(ty) > corridorHalfWidthM && Math.abs(ty) <= 10.0) {
+              if ((ty > 0.0 && vy < -0.5) || (ty < 0.0 && vy > 0.5)) {
+                const t_enter = (Math.abs(ty) - corridorHalfWidthM) / Math.max(Math.abs(vy), 0.1);
+                const future_x = tx + vx * t_enter;
+                if (future_x >= 0.0 && future_x <= 25.0 && t_enter <= 3.0) {
+                  is_threat = true;
+                  const future_r = Math.hypot(future_x, 0.0);
+                  reach = Math.min(future_r + 4.0, maxThreatDistanceM);
+                  bearing = Math.atan2(ty, tx);
+                }
+              }
+            }
+
+            if (!is_threat) return;
+
+            // Smooth Gaussian lobe with minimum 0.35 rad angular spread (eliminates needle spear)
+            const sigma = Math.max(0.35, width / Math.max(tr, 1.0));
+            let diff = theta - bearing;
             diff = ((diff + Math.PI) % (2 * Math.PI)) - Math.PI;
             if (diff < -Math.PI) diff += 2 * Math.PI;
 
-            const spike = (tr + 5.0) * Math.exp(-0.5 * Math.pow(diff / sigma, 2));
+            const spike = reach * Math.exp(-0.5 * Math.pow(diff / sigma, 2));
             r_attn = Math.max(r_attn, spike);
+          } else {
+            // General motion lookahead (fallback)
+            const sigma = Math.max(width / Math.max(tr, 1.0), 0.2);
+            if (speed >= motionSpeedThreshold) {
+              const pred_x = tx + vx * motionLeadTime;
+              const pred_y = ty + vy * motionLeadTime;
+              const pred_r = Math.hypot(pred_x, pred_y);
+              const pred_theta = Math.atan2(pred_y, pred_x);
+              const reach = Math.min(Math.max(tr, pred_r) + 4.0, maxThreatDistanceM);
+              let diff = theta - pred_theta;
+              diff = ((diff + Math.PI) % (2 * Math.PI)) - Math.PI;
+              if (diff < -Math.PI) diff += 2 * Math.PI;
+              const spike = reach * Math.exp(-0.5 * Math.pow(diff / sigma, 2));
+              r_attn = Math.max(r_attn, spike);
+            } else {
+              let diff = theta - ttheta;
+              diff = ((diff + Math.PI) % (2 * Math.PI)) - Math.PI;
+              if (diff < -Math.PI) diff += 2 * Math.PI;
+              const spike = Math.min(tr + 5.0, maxThreatDistanceM) * Math.exp(-0.5 * Math.pow(diff / sigma, 2));
+              r_attn = Math.max(r_attn, spike);
+            }
+          }
         });
         r = Math.max(r, r_attn);
       }
@@ -147,6 +226,7 @@ class PolarGridOverlay {
 
     this.foveaLine.geometry.attributes.position.needsUpdate = true;
   }
+
 }
 
 window.PolarGridOverlay = PolarGridOverlay;

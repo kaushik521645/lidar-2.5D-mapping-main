@@ -109,9 +109,18 @@ def test_server_api_sequences_and_scenarios():
     assert any(s["sequence"] == "00" for s in seqs)
     assert any(s["sequence"] == "21" for s in seqs)
 
-    # Scenarios should include all sequences
+    # Scenarios should include all sequences and is_precomputed metadata
     s_res = client.get("/api/scenarios")
     assert s_res.status_code == 200
     scenarios = s_res.json()
     assert any(s["id"] == "kitti_seq_00" for s in scenarios)
     assert any(s["id"] == "kitti_seq_04" for s in scenarios)
+    assert "is_precomputed" in scenarios[0]
+    assert isinstance(scenarios[0]["is_precomputed"], bool)
+
+    # Test WebSocket auto-loop control command
+    with client.websocket_connect("/ws/grid") as ws:
+        ws.send_json({"command": "set_auto_loop", "enabled": True})
+        ws.send_json({"command": "next_scenario"})
+        ws.send_json({"command": "prev_scenario"})
+

@@ -10,6 +10,14 @@ foveation:
   max_stretch: 2.5
   stretch_speed_ref_mps: 20.0
   shear_strength: 0.6
+  motion_foveation_enabled: true
+  collision_focus_only: true
+  motion_speed_threshold_mps: 0.8
+  motion_lead_time_s: 1.0
+  motion_buffer_m: 4.0
+  motion_acuity_boost: 1.3
+  max_threat_distance_m: 35.0
+  corridor_half_width_m: 3.2
 
 # Polar grid construction parameters
 grid:

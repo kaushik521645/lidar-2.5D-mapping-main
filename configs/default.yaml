@@ -22,6 +22,14 @@ foveation:
   max_stretch: 2.5           # Max forward elongation factor at speed
   stretch_speed_ref_mps: 20.0 # Speed (m/s) at which stretch reaches max_stretch (~72 km/h)
   shear_strength: 0.6        # Lateral shear sensitivity to steering angle (0.0 - 1.0)
+  motion_foveation_enabled: true       # Enable dynamic foveal lobes locking onto moving obstacles
+  collision_focus_only: true           # Only focus on oncoming or straight-on collision threats
+  motion_speed_threshold_mps: 0.8      # Minimum velocity (m/s) to trigger motion foveation
+  motion_lead_time_s: 1.0              # Trajectory look-ahead lead time (seconds)
+  motion_buffer_m: 4.0                 # Safety distance buffer around moving obstacle (meters)
+  motion_acuity_boost: 1.3             # Acuity boost factor for fast-moving obstacles
+  max_threat_distance_m: 35.0         # Max range to extend dynamic collision foveation (meters)
+  corridor_half_width_m: 3.2          # Forward lane corridor half-width (meters)
 
 perception:
   # 4-Class Taxonomy:

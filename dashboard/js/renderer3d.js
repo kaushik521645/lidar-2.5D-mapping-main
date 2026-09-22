@@ -120,13 +120,19 @@ class FoveaRenderer3D {
     const v_state = frameData.vehicle_state || { speed_mps: 0, steering_angle_rad: 0 };
     const fovea_cfg = frameData.foveation_params || { base_fine_radius_m: 10, max_stretch: 2.5, shear_strength: 0.6 };
 
-    // Update Foveation Dynamic Contour
+    // Update Foveation Dynamic Contour with Motion-Adaptive Lobes
     this.polarOverlay.updateFoveationContour(
       v_state.speed_mps,
       v_state.steering_angle_rad,
       fovea_cfg.base_fine_radius_m,
       fovea_cfg.max_stretch,
-      frameData.tracks || []
+      frameData.tracks || [],
+      fovea_cfg.motion_foveation_enabled !== false,
+      fovea_cfg.motion_speed_threshold_mps || 0.8,
+      fovea_cfg.motion_lead_time_s || 1.0,
+      fovea_cfg.collision_focus_only !== false,
+      fovea_cfg.corridor_half_width_m || 3.2,
+      fovea_cfg.max_threat_distance_m || 35.0
     );
 
     // Render 2.5D Cells

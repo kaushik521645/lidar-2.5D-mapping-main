@@ -187,13 +187,15 @@ def update_tracks(
 def cluster_dynamic_detections(
     cell_centers: List[Tuple[float, float, int]],
     cluster_dist_m: float = 2.5,
+    max_cluster_span_m: float = 14.0,
+    max_cells_per_cluster: int = 200,
 ) -> List[Tuple[float, float, int]]:
     """
     Clusters neighboring dynamic cells into unified object centroids.
+    Filters out oversized clusters (e.g. continuous walls, fences, road sheets).
     """
     if cell_centers is None or len(cell_centers) == 0:
         return []
-
 
     n = len(cell_centers)
     if n == 1:
@@ -218,6 +220,15 @@ def cluster_dynamic_detections(
         for c_id in range(n_components):
             mask = (labels == c_id)
             c_pts = pts[mask]
+            
+            # Reject oversized non-vehicle clusters
+            if len(c_pts) > max_cells_per_cluster:
+                continue
+            span_x = float(np.max(c_pts[:, 0]) - np.min(c_pts[:, 0]))
+            span_y = float(np.max(c_pts[:, 1]) - np.min(c_pts[:, 1]))
+            if span_x > max_cluster_span_m or span_y > max_cluster_span_m:
+                continue
+
             centroid_x = float(np.mean(c_pts[:, 0]))
             centroid_y = float(np.mean(c_pts[:, 1]))
             cls_val = int(classes[mask][0])
@@ -239,7 +250,11 @@ def cluster_dynamic_detections(
                     c_indices.append(j)
                     visited.add(j)
             c_pts = pts[c_indices]
-            clusters.append((float(np.mean(c_pts[:, 0])), float(np.mean(c_pts[:, 1])), int(classes[c_indices[0]])))
+            if len(c_pts) <= max_cells_per_cluster:
+                span_x = float(np.max(c_pts[:, 0]) - np.min(c_pts[:, 0]))
+                span_y = float(np.max(c_pts[:, 1]) - np.min(c_pts[:, 1]))
+                if span_x <= max_cluster_span_m and span_y <= max_cluster_span_m:
+                    clusters.append((float(np.mean(c_pts[:, 0])), float(np.mean(c_pts[:, 1])), int(classes[c_indices[0]])))
         return clusters
 
 

@@ -22,7 +22,19 @@ from src.perception.class_map import map_semantickitti_to_4class
 from src.perception.heuristic_fallback import heuristic_segment_points
 from src.grid.grid_engine import PolarGridEngine
 from src.grid.grid_types import VehicleState, GridCell
-from src.grid.foveation import BASE_FINE_RADIUS, MAX_STRETCH
+from src.grid.foveation import (
+    BASE_FINE_RADIUS,
+    MAX_STRETCH,
+    MOTION_FOVEATION_ENABLED,
+    COLLISION_FOCUS_ONLY,
+    CORRIDOR_HALF_WIDTH_M,
+    MAX_THREAT_DISTANCE_M,
+    MOTION_SPEED_THRESHOLD_MPS,
+    MOTION_LEAD_TIME_S,
+    MOTION_BUFFER_M,
+    MOTION_ACUITY_BOOST,
+    detect_moving_objects,
+)
 from src.tracking.kalman_tracker import (
     KalmanTrackerManager,
     erase_vacated_footprints,
@@ -112,16 +124,28 @@ def process_sequence_to_json(
         raw_detections = []
         for key, cell in grid_map.items():
             if cell.semantic_class == 3:
-                cx, cy, _, _ = engine.get_cell_spatial_center(key[0], key[1], cell.resolution_tier)
+                cx, cy, _, _ = engine.get_cell_spatial_center(key[1], key[2], cell.resolution_tier)
                 raw_detections.append((cx, cy, 3))
 
         dynamic_detections = cluster_dynamic_detections(raw_detections, cluster_dist_m=2.5)
-        active_tracks = tracker.update_tracks(dynamic_detections)
+        tracker.update_tracks(dynamic_detections)
+        all_tracks = tracker.tracks
+
+        # On frame 0, re-project grid so initial dynamic detections receive high-acuity allocation immediately
+        if frame_id == 0 and all_tracks:
+            grid_map = engine.project_to_grid(
+                points=points_5d,
+                vehicle_state=v_state,
+                frame_id=frame_id,
+                roof_height_m=roof_h,
+                use_foveation=True,
+                active_tracks=all_tracks
+            )
 
         # Step 4: Active Footprint Erasure (Anti-Ghosting)
         grid_map, prev_footprints, erased_count = erase_vacated_footprints(
             grid_map=grid_map,
-            tracks=active_tracks,
+            tracks=all_tracks,
             prev_footprints=prev_footprints,
             frame_id=frame_id,
             grid_engine=engine,
@@ -153,6 +177,10 @@ def process_sequence_to_json(
 
         mem_metrics = compute_memory_metrics(grid_map, engine)
 
+        # Evaluate motion of tracked dynamic obstacles
+        moving_info = detect_moving_objects(all_tracks, speed_threshold_mps=MOTION_SPEED_THRESHOLD_MPS)
+        moving_count = sum(1 for m in moving_info if m["is_moving"])
+
         frame_data = {
             "frame_id": frame_id,
             "timestamp": float(meta.get("timestamp_s", frame_id * 0.1)),
@@ -165,9 +193,17 @@ def process_sequence_to_json(
             "foveation_params": {
                 "base_fine_radius_m": BASE_FINE_RADIUS,
                 "max_stretch": MAX_STRETCH,
+                "motion_foveation_enabled": MOTION_FOVEATION_ENABLED,
+                "collision_focus_only": COLLISION_FOCUS_ONLY,
+                "corridor_half_width_m": CORRIDOR_HALF_WIDTH_M,
+                "max_threat_distance_m": MAX_THREAT_DISTANCE_M,
+                "motion_speed_threshold_mps": MOTION_SPEED_THRESHOLD_MPS,
+                "motion_lead_time_s": MOTION_LEAD_TIME_S,
+                "motion_buffer_m": MOTION_BUFFER_M,
+                "motion_acuity_boost": MOTION_ACUITY_BOOST,
             },
             "cells": cells_list,
-            "tracks": [t.to_dict() for t in active_tracks],
+            "tracks": [t.to_dict() for t in all_tracks],
             "metrics": {
                 "fps": round(fps, 1),
                 "latency_ms": round(latency_ms, 2),
@@ -176,6 +212,8 @@ def process_sequence_to_json(
                 "memory_savings_pct": round(mem_metrics["memory_savings_pct"], 1),
                 "ghosting_cells_erased": erased_count,
                 "active_cells_count": mem_metrics["active_cells_count"],
+                "moving_objects_count": moving_count,
+                "motion_foveation_active": moving_count > 0 and MOTION_FOVEATION_ENABLED,
             },
         }
         frames_payload.append(frame_data)

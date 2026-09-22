@@ -49,10 +49,25 @@
       <section class="panel-section">
         <div class="section-header">
           <span>Scenario Selection</span>
+          <span id="badge-autoloop" class="badge-status looping">🔁 AUTO-LOOP ON</span>
         </div>
+
+        <!-- Auto-Loop All Sequences Toggle -->
+        <div class="auto-loop-row">
+          <div class="auto-loop-label">
+            <span class="loop-icon">🔁</span>
+            <span>Auto-Loop All Sequences</span>
+          </div>
+          <label class="switch" title="Automatically advance to the next sequence when the current sequence finishes">
+            <input type="checkbox" id="toggle-auto-loop" checked>
+            <span class="slider round"></span>
+          </label>
+        </div>
+
         <div class="control-group">
           <label class="control-label-row" for="select-scenario">
             <span>Active Scene</span>
+            <span id="lbl-sequence-pos" class="control-value" style="font-size:11px;">Seq 00 / 21</span>
           </label>
           <select id="select-scenario">
             <optgroup label="Genuine KITTI Odometry (Real Velodyne HDL-64E, Sequences 00-21)">
@@ -88,6 +103,24 @@
               <option value="pothole_alley">Pothole & Rough Terrain Alley (Negative Obstacles)</option>
               <option value="bridge_overpass">Bridge Overpass (Multi-Layer Overhead Structure)</option>
             </optgroup>
+          </select>
+        </div>
+
+        <!-- Quick Sequence Navigation Buttons -->
+        <div class="seq-nav-row">
+          <button id="btn-prev-seq" class="btn-seq" title="Jump to previous sequence">⏮ Prev Seq</button>
+          <button id="btn-next-seq" class="btn-seq" title="Jump to next sequence">⏭ Next Seq</button>
+        </div>
+
+        <!-- Loop Scope Selector -->
+        <div class="control-group" style="margin-top: 4px;">
+          <label class="control-label-row" for="select-loop-scope">
+            <span>Loop Playlist Scope</span>
+          </label>
+          <select id="select-loop-scope">
+            <option value="all_kitti" selected>All KITTI Sequences (00 – 21)</option>
+            <option value="ready_only">Ready Sequences (Instant Replay)</option>
+            <option value="all_scenes">All Scenes & Benchmarks</option>
           </select>
         </div>
 
@@ -178,6 +211,42 @@
           </div>
           <input type="range" id="slider-base-radius" min="5.0" max="25.0" step="1.0" value="10.0">
         </div>
+
+        <!-- Motion-Adaptive Dynamic Foveation Toggle & Parameters -->
+        <div class="control-group" style="margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.08);">
+          <div class="control-label-row">
+            <label for="chk-motion-foveation" style="font-weight:600; color:#38bdf8;">Motion-Adaptive Foveation</label>
+            <input type="checkbox" id="chk-motion-foveation" checked style="accent-color:#38bdf8; cursor:pointer; width:16px; height:16px;">
+          </div>
+          <span style="font-size:10px; color:var(--text-secondary); display:block; margin-top:2px;">Dynamic lobes locking onto moving obstacle trajectories</span>
+        </div>
+
+        <!-- Collision Threat Focus Toggle -->
+        <div class="control-group" style="margin-top: 8px;">
+          <div class="control-label-row">
+            <label for="chk-collision-focus" style="font-weight:600; color:#38bdf8;">Oncoming / Collision Threat Only</label>
+            <input type="checkbox" id="chk-collision-focus" checked style="accent-color:#38bdf8; cursor:pointer; width:16px; height:16px;">
+          </div>
+          <span style="font-size:10px; color:var(--text-secondary); display:block; margin-top:2px;">Strictly targets oncoming traffic &amp; lane collisions; ignores receding/distant objects</span>
+        </div>
+
+        <!-- Motion Speed Threshold Slider -->
+        <div class="control-group">
+          <div class="control-label-row">
+            <label for="slider-motion-thresh">Motion Velocity Cutoff</label>
+            <span id="val-motion-thresh" class="control-value">0.8 m/s</span>
+          </div>
+          <input type="range" id="slider-motion-thresh" min="0.2" max="3.0" step="0.1" value="0.8">
+        </div>
+
+        <!-- Trajectory Look-Ahead Lead Time Slider -->
+        <div class="control-group">
+          <div class="control-label-row">
+            <label for="slider-lead-time">Trajectory Lead Time</label>
+            <span id="val-lead-time" class="control-value">1.0 s</span>
+          </div>
+          <input type="range" id="slider-lead-time" min="0.2" max="2.5" step="0.1" value="1.0">
+        </div>
       </section>
 
     </aside>
@@ -257,6 +326,11 @@
         <div class="hud-pill">
           <span style="color:var(--accent-cyan);">Cyan Contour:</span>
           <span style="font-size:11px; color:var(--text-secondary);">Live Foveation Boundary (Tier 0: 5cm)</span>
+        </div>
+
+        <div class="hud-pill" id="hud-motion-fovea-pill">
+          <span style="color:#38bdf8;">Motion Dynamic Fovea:</span>
+          <span id="hud-motion-status" style="font-size:11px; color:#4ade80; font-weight:600;">ACTIVE (Tracking)</span>
         </div>
       </div>
 
@@ -367,11 +441,11 @@
   </main>
 
   <!-- Application Scripts -->
-  <script src="js/polar_grid.js?v=1.0.2"></script>
-  <script src="js/renderer3d.js?v=1.0.2"></script>
-  <script src="js/metrics_charts.js?v=1.0.2"></script>
-  <script src="js/loader.js?v=1.0.2"></script>
-  <script src="js/scenarios.js?v=1.0.2"></script>
-  <script src="js/app.js?v=1.0.2"></script>
+  <script src="js/polar_grid.js?v=1.2.0"></script>
+  <script src="js/renderer3d.js?v=1.2.0"></script>
+  <script src="js/metrics_charts.js?v=1.2.0"></script>
+  <script src="js/loader.js?v=1.2.0"></script>
+  <script src="js/scenarios.js?v=1.2.0"></script>
+  <script src="js/app.js?v=1.2.0"></script>
 </body>
 </html>

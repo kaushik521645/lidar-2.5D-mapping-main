@@ -7,11 +7,64 @@ class ScenarioManager {
     this.currentScenarioId = 'kitti_odometry';
     this.frames = [];
     this.currentFrameIdx = 0;
+    this.cache = new Map();
+    this.prefetches = new Map();
+  }
+
+  hasCached(scenarioId) {
+    return this.cache.has(scenarioId);
+  }
+
+  getFrameCount() {
+    return this.frames ? this.frames.length : 0;
+  }
+
+  isLastFrame() {
+    return this.frames.length > 0 && this.currentFrameIdx >= this.frames.length - 1;
+  }
+
+  async prefetchScenario(scenarioId) {
+    if (!scenarioId || this.cache.has(scenarioId) || this.prefetches.has(scenarioId)) {
+      return;
+    }
+    const fetchPromise = (async () => {
+      try {
+        const response = await fetch(`/api/frames/${scenarioId}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        if (Array.isArray(data) && data.length > 0) {
+          this.cache.set(scenarioId, data);
+        }
+      } catch (e) {
+        console.debug(`[ScenarioManager] Prefetch background note for ${scenarioId}:`, e);
+      } finally {
+        this.prefetches.delete(scenarioId);
+      }
+    })();
+    this.prefetches.set(scenarioId, fetchPromise);
   }
 
   async loadScenario(scenarioId, onProgress = null) {
     this.currentScenarioId = scenarioId;
     this.currentFrameIdx = 0;
+
+    // Check in-memory cache for instant zero-latency transition
+    if (this.cache.has(scenarioId)) {
+      this.frames = this.cache.get(scenarioId);
+      if (onProgress) onProgress(100, `Ready (${this.frames.length} frames from fast cache)`);
+      return this.frames;
+    }
+
+    // Await prefetch if in-flight
+    if (this.prefetches.has(scenarioId)) {
+      if (onProgress) onProgress(40, "Finishing background sequence cache...");
+      await this.prefetches.get(scenarioId);
+      if (this.cache.has(scenarioId)) {
+        this.frames = this.cache.get(scenarioId);
+        if (onProgress) onProgress(100, `Ready (${this.frames.length} frames initialized)`);
+        return this.frames;
+      }
+    }
 
     if (onProgress) onProgress(8, "Connecting to perception API server...");
 
@@ -54,6 +107,10 @@ class ScenarioManager {
       } else {
         if (onProgress) onProgress(50, "Receiving 2.5D polar grid payload...");
         this.frames = await response.json();
+      }
+
+      if (Array.isArray(this.frames) && this.frames.length > 0) {
+        this.cache.set(scenarioId, this.frames);
       }
 
       if (onProgress) onProgress(100, `Ready (${this.frames.length} frames initialized)`);
