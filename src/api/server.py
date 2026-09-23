@@ -26,7 +26,10 @@ from fastapi.responses import JSONResponse, FileResponse
 
 from src.ingestion.kitti_loader import KITTILoader
 from src.perception.segment import segment_points
-from src.grid.grid_engine import PolarGridEngine
+from src.grid.grid_engine import PolarGridEngine, warmup_jit
+
+# Warm up Numba JIT once at server startup so streaming frames encounter zero compile latency
+warmup_jit()
 from src.grid.grid_types import VehicleState
 from src.grid.foveation import (
     fine_radius_at_angle,
@@ -304,7 +307,9 @@ async def websocket_grid_stream(websocket: WebSocket):
     # Backpressure: bounded queue prevents unbounded growth for slow clients
     frame_queue: asyncio.Queue = asyncio.Queue(maxsize=2)
 
-    def load_scenario_frames(s_id: str) -> List[Dict[str, Any]]:
+    last_stream_latency_ms = 0.0
+
+    def load_scenario_frames(s_id: str, allow_cold_export: bool = False) -> List[Dict[str, Any]]:
         seq_match = re.search(r"(?:kitti_seq_|kitti_odometry_|kitti_|seq_)?(\d{1,2})", s_id, re.IGNORECASE)
         if s_id in ("kitti_odometry", "kitti_sample"):
             resolved = "kitti_odometry"
@@ -331,7 +336,7 @@ async def websocket_grid_stream(websocket: WebSocket):
             except Exception:
                 pass
 
-        if is_k:
+        if is_k and allow_cold_export:
             out_p = export_kitti_sequence(sequence=seq_num, output_dir=PRECOMPUTED_DIR, max_frames=25)
             if os.path.exists(out_p):
                 try:
@@ -341,10 +346,10 @@ async def websocket_grid_stream(websocket: WebSocket):
                     pass
         return []
 
-    frames = load_scenario_frames(current_scenario)
+    frames = load_scenario_frames(current_scenario, allow_cold_export=True)
     if not frames:
         export_all_precomputed()
-        frames = load_scenario_frames(current_scenario)
+        frames = load_scenario_frames(current_scenario, allow_cold_export=True)
 
     try:
         while True:
@@ -360,7 +365,7 @@ async def websocket_grid_stream(websocket: WebSocket):
                         current_scenario = scenario_id
                         current_frame_idx = 0
                         user_override = False
-                        new_frames = load_scenario_frames(current_scenario)
+                        new_frames = load_scenario_frames(current_scenario, allow_cold_export=True)
                         if new_frames:
                             frames = new_frames
 
@@ -368,26 +373,30 @@ async def websocket_grid_stream(websocket: WebSocket):
                     auto_loop_all = bool(msg.get("enabled", True))
 
                 elif cmd == "next_scenario":
-                    all_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
+                    all_seq_ids = [s["id"] for s in get_all_kitti_sequences() if s.get("is_precomputed", False)]
+                    if not all_seq_ids:
+                        all_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
                     if current_scenario in all_seq_ids:
                         idx = all_seq_ids.index(current_scenario)
                         current_scenario = all_seq_ids[(idx + 1) % len(all_seq_ids)]
                     elif all_seq_ids:
                         current_scenario = all_seq_ids[0]
                     current_frame_idx = 0
-                    new_frames = load_scenario_frames(current_scenario)
+                    new_frames = load_scenario_frames(current_scenario, allow_cold_export=False)
                     if new_frames:
                         frames = new_frames
 
                 elif cmd == "prev_scenario":
-                    all_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
+                    all_seq_ids = [s["id"] for s in get_all_kitti_sequences() if s.get("is_precomputed", False)]
+                    if not all_seq_ids:
+                        all_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
                     if current_scenario in all_seq_ids:
                         idx = all_seq_ids.index(current_scenario)
                         current_scenario = all_seq_ids[(idx - 1 + len(all_seq_ids)) % len(all_seq_ids)]
                     elif all_seq_ids:
                         current_scenario = all_seq_ids[0]
                     current_frame_idx = 0
-                    new_frames = load_scenario_frames(current_scenario)
+                    new_frames = load_scenario_frames(current_scenario, allow_cold_export=False)
                     if new_frames:
                         frames = new_frames
 
@@ -441,23 +450,37 @@ async def websocket_grid_stream(websocket: WebSocket):
                         pass
                 await frame_queue.put(frame_data)
 
-                # Send all queued frames
+                # Send all queued frames — measure live stream latency per frame
                 while not frame_queue.empty():
                     queued_frame = await frame_queue.get()
-                    compressed = zlib.compress(json.dumps(queued_frame).encode('utf-8'))
+
+                    # Fix 1B: Annotate metrics BEFORE serialization so outgoing frame includes stream latency
+                    if "metrics" in queued_frame:
+                        m = queued_frame["metrics"]
+                        m["pipeline_latency_ms"] = m.get("latency_ms", 0.0)
+                        m["pipeline_fps"] = m.get("fps", 0.0)
+                        m["stream_latency_ms"] = round(last_stream_latency_ms, 2)
+                        m["stream_fps"] = round(playback_fps, 1)
+
+                    _t_send_start = time.perf_counter()
+                    payload_bytes = json.dumps(queued_frame).encode('utf-8')
+                    compressed = zlib.compress(payload_bytes, level=1)
                     await websocket.send_bytes(compressed)
+                    last_stream_latency_ms = (time.perf_counter() - _t_send_start) * 1000.0
 
                 if is_playing:
                     if auto_loop_all and current_frame_idx >= len(frames) - 1:
-                        # Automatically advance to next KITTI sequence
-                        all_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
-                        if current_scenario in all_seq_ids:
-                            idx = all_seq_ids.index(current_scenario)
-                            current_scenario = all_seq_ids[(idx + 1) % len(all_seq_ids)]
-                        elif all_seq_ids:
-                            current_scenario = all_seq_ids[0]
+                        # Fix 1A: Advance only to precomputed sequences to prevent mid-stream stalls
+                        ready_seq_ids = [s["id"] for s in get_all_kitti_sequences() if s.get("is_precomputed", False)]
+                        if not ready_seq_ids:
+                            ready_seq_ids = [s["id"] for s in get_all_kitti_sequences()]
+                        if current_scenario in ready_seq_ids:
+                            idx = ready_seq_ids.index(current_scenario)
+                            current_scenario = ready_seq_ids[(idx + 1) % len(ready_seq_ids)]
+                        elif ready_seq_ids:
+                            current_scenario = ready_seq_ids[0]
                         current_frame_idx = 0
-                        new_frames = load_scenario_frames(current_scenario)
+                        new_frames = load_scenario_frames(current_scenario, allow_cold_export=False)
                         if new_frames:
                             frames = new_frames
                     else:

@@ -131,3 +131,65 @@ def test_server_api_sequences_and_scenarios():
         ws.send_json({"command": "next_scenario"})
         ws.send_json({"command": "prev_scenario"})
 
+
+def test_frame2_not_mass_labeled_dynamic(real_kitti_loader):
+    """
+    Regression test for Step 2 mass misclassification:
+    Verify that in KITTI Sequence 00 frame 2, points are NOT mass-labeled as
+    dynamic (Class 3). The majority must be terrain (0/1) and static obstacles (2),
+    with Class 3 < 5% of all points, and compact vehicle-sized clusters cleanly
+    passing the 200-cell / 14m clustering filter.
+    """
+    from src.tracking.kalman_tracker import cluster_dynamic_detections
+
+    real_kitti_loader.set_sequence("00")
+    scan2 = real_kitti_loader[2]
+    pts = scan2[:, :3]
+    labels = heuristic_segment_points(pts)
+
+    tot = len(pts)
+    c0 = np.sum(labels == 0)
+    c1 = np.sum(labels == 1)
+    c2 = np.sum(labels == 2)
+    c3 = np.sum(labels == 3)
+
+    # Class 3 must be a small fraction of scene, not mass-labeled (> 50%)
+    c3_pct = c3 / tot * 100.0
+    assert c3_pct < 5.0, f"Frame 2 dynamic points should be < 5%, got {c3_pct:.1f}%"
+    assert (c0 + c1) > c3, "Terrain (Class 0 + 1) should exceed dynamic objects"
+    assert c2 > c3, "Static obstacles (Class 2) should exceed dynamic objects"
+
+    # End-to-end grid projection + clustering: verify clusters pass filter
+    engine = PolarGridEngine()
+    points_5d = np.column_stack([pts, np.zeros(tot), labels])
+    grid_map = engine.project_to_grid(points_5d, vehicle_state=VehicleState(10.0, 0.0), frame_id=2)
+
+    raw_c3 = [
+        engine.get_cell_spatial_center(k[1], k[2], cell.resolution_tier)[:2] + (3,)
+        for k, cell in grid_map.items()
+        if cell.semantic_class == 3
+    ]
+    clusters = cluster_dynamic_detections(raw_c3, cluster_dist_m=2.5)
+    assert len(clusters) >= 5, (
+        f"Vehicle-scale clusters must pass the 200-cell/14m filter, got {len(clusters)}"
+    )
+
+
+def test_real_moving_vehicle_detected_as_dynamic(real_kitti_loader):
+    """
+    Regression test ensuring Fix 2 does NOT overcorrect into zero dynamic detections.
+    Tests frame 10 of Sequence 00 where moving traffic is present, verifying that
+    genuine dynamic obstacles are still detected.
+    """
+    real_kitti_loader.set_sequence("00")
+    scan10 = real_kitti_loader[10]
+    pts10 = scan10[:, :3]
+    labels10 = heuristic_segment_points(pts10)
+
+    tot10 = len(pts10)
+    c3_10 = np.sum(labels10 == 3)
+
+    assert c3_10 > 500, f"Expected > 500 dynamic points in frame 10 traffic, got {c3_10}"
+    assert c3_10 / tot10 < 0.10, f"Dynamic points should remain < 10% of total scan, got {c3_10/tot10*100:.1f}%"
+
+

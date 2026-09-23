@@ -22,8 +22,10 @@ class MetricsHUDController {
     const m = frameData.metrics;
 
     // Latency & FPS
-    if (this.fpsElem) this.fpsElem.textContent = (m.fps || 0).toFixed(1);
-    if (this.latencyElem) this.latencyElem.textContent = (m.latency_ms || 0).toFixed(1);
+    const pFps = m.pipeline_fps !== undefined ? m.pipeline_fps : (m.fps || 0);
+    const pLat = m.pipeline_latency_ms !== undefined ? m.pipeline_latency_ms : (m.latency_ms || 0);
+    if (this.fpsElem) this.fpsElem.textContent = pFps.toFixed(1);
+    if (this.latencyElem) this.latencyElem.textContent = pLat.toFixed(1);
 
     // Memory Savings
     const savingsPct = m.memory_savings_pct || 0;
@@ -43,7 +45,18 @@ class MetricsHUDController {
       this.activeCellsElem.textContent = m.active_cells_count || 0;
     }
 
-    // Ghosting Counter
+    // Ghosting Counter: accumulate within active sequence playback; reset on sequence transition or loop restart
+    const fid = frameData.frame_id !== undefined ? frameData.frame_id : 0;
+    const scen = frameData.scenario_name || frameData.scenario || null;
+    if (scen && scen !== this.currentScenario) {
+      this.totalGhostingErased = 0;
+      this.currentScenario = scen;
+    }
+    if (fid === 0 || (this.lastFrameId !== undefined && fid < this.lastFrameId)) {
+      this.totalGhostingErased = 0;
+    }
+    this.lastFrameId = fid;
+
     if (m.ghosting_cells_erased) {
       this.totalGhostingErased += m.ghosting_cells_erased;
     }

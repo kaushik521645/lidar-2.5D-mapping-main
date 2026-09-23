@@ -25,9 +25,11 @@ from src.ingestion.extract import ensure_velodyne_extracted
 from src.ingestion.sample_generator import generate_kitti_sample_dataset
 from src.api.export_precomputed import export_all_precomputed, export_kitti_sequence, export_synthetic_kitti_like
 from src.metrics.evaluator import run_full_evaluation
+from src.grid.grid_engine import warmup_jit
 
 
 def main():
+    warmup_jit()
     parser = argparse.ArgumentParser(description="FoveaMap Perception Dashboard Runner")
     parser.add_argument("--sequence", type=str, default="00", help="KITTI Sequence to load (e.g. 00, 01, ..., 21)")
     parser.add_argument("--no-auto-loop", action="store_true", help="Disable automatic sequence looping")

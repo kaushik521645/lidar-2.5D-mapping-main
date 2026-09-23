@@ -13,6 +13,80 @@ from typing import Optional
 import numpy as np
 import yaml
 
+try:
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    NUMBA_AVAILABLE = False
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+
+@njit(fastmath=True)
+def _jit_sector_ground_profile(h_plane, sector_idx, r_bins, candidate_mask, num_sectors=24, num_bins=41, r_bin_size=2.5):
+    counts = np.zeros((num_sectors, num_bins), dtype=np.int32)
+    n_pts = len(h_plane)
+    for i in range(n_pts):
+        if candidate_mask[i]:
+            s = sector_idx[i]
+            b = r_bins[i]
+            counts[s, b] += 1
+
+    offsets = np.zeros((num_sectors, num_bins), dtype=np.int32)
+    total_cand = 0
+    for s in range(num_sectors):
+        for b in range(num_bins):
+            offsets[s, b] = total_cand
+            total_cand += counts[s, b]
+
+    cand_vals = np.empty(total_cand, dtype=np.float32)
+    cur_pos = np.copy(offsets)
+    for i in range(n_pts):
+        if candidate_mask[i]:
+            s = sector_idx[i]
+            b = r_bins[i]
+            pos = cur_pos[s, b]
+            cand_vals[pos] = h_plane[i]
+            cur_pos[s, b] = pos + 1
+
+    ground_grid = np.zeros((num_sectors, num_bins), dtype=np.float32)
+    slope_limit = 0.32 * r_bin_size
+
+    for s in range(num_sectors):
+        last_z_offset = 0.0
+        for b in range(num_bins):
+            cnt = counts[s, b]
+            if cnt >= 4:
+                start = offsets[s, b]
+                end = start + cnt
+                vals = cand_vals[start:end]
+                vals.sort()
+                idx_float = 0.10 * (cnt - 1)
+                lo = int(idx_float)
+                hi = min(lo + 1, cnt - 1)
+                weight = idx_float - lo
+                bin_offset = vals[lo] * (1.0 - weight) + vals[hi] * weight
+                if abs(bin_offset - last_z_offset) <= slope_limit:
+                    last_z_offset = bin_offset
+            ground_grid[s, b] = last_z_offset
+
+    return ground_grid
+
+
+_HEURISTIC_JIT_WARMED = False
+
+def warmup_heuristic_jit():
+    global _HEURISTIC_JIT_WARMED
+    if NUMBA_AVAILABLE and not _HEURISTIC_JIT_WARMED:
+        dummy_h = np.array([0.0, 0.1, -0.1], dtype=np.float32)
+        dummy_s = np.array([0, 0, 1], dtype=np.int32)
+        dummy_b = np.array([0, 1, 0], dtype=np.int32)
+        dummy_m = np.array([True, True, True], dtype=np.bool_)
+        _jit_sector_ground_profile(dummy_h, dummy_s, dummy_b, dummy_m, 24, 41, 2.5)
+        _HEURISTIC_JIT_WARMED = True
+
 
 def fit_ground_plane_ransac(
     points_xyz: np.ndarray,
@@ -147,20 +221,23 @@ def heuristic_segment_points(
     # Candidate points for ground per bin: points with h_plane near zero
     candidate_mask = (h_plane >= -0.6) & (h_plane <= 0.5)
 
-    ground_grid = np.zeros((num_sectors, 41), dtype=np.float32)
-
-    for s in range(num_sectors):
-        last_z_offset = 0.0
-        for b in range(41):
-            mask = candidate_mask & (sector_idx == s) & (r_bins == b)
-            n_in_bin = np.sum(mask)
-            if n_in_bin >= 4:
-                # 10th percentile offset from plane
-                bin_offset = float(np.percentile(h_plane[mask], 10))
-                # Enforce physical continuity (< 18 degree ground slope relative to plane)
-                if abs(bin_offset - last_z_offset) <= (0.32 * r_bin_size):
-                    last_z_offset = bin_offset
-            ground_grid[s, b] = last_z_offset
+    if NUMBA_AVAILABLE:
+        h_plane_f32 = np.ascontiguousarray(h_plane, dtype=np.float32)
+        ground_grid = _jit_sector_ground_profile(
+            h_plane_f32, sector_idx, r_bins, candidate_mask, num_sectors, 41, float(r_bin_size)
+        )
+    else:
+        ground_grid = np.zeros((num_sectors, 41), dtype=np.float32)
+        for s in range(num_sectors):
+            last_z_offset = 0.0
+            for b in range(41):
+                mask = candidate_mask & (sector_idx == s) & (r_bins == b)
+                n_in_bin = np.sum(mask)
+                if n_in_bin >= 4:
+                    bin_offset = float(np.percentile(h_plane[mask], 10))
+                    if abs(bin_offset - last_z_offset) <= (0.32 * r_bin_size):
+                        last_z_offset = bin_offset
+                ground_grid[s, b] = last_z_offset
 
     z_ground_offset = ground_grid[sector_idx, r_bins]
     height_above_ground = h_plane - z_ground_offset
@@ -186,17 +263,46 @@ def heuristic_segment_points(
     labels[non_ground_mask] = 2
 
     # Dynamic Objects (Class 3):
-    # Strictly isolated vehicle/pedestrian scale objects within or immediately adjacent to roadway
-    # - Within active roadway corridor (|y| <= road_half_width_m + 0.3m)
-    # - True obstacle height: 0.35m <= height_above_ground <= 2.20m
-    # - Range horizon: 1.8m <= r <= 45.0m (excludes ego vehicle self-returns r < 1.8m)
+    # Strictly isolated vehicle/pedestrian scale objects within or immediately adjacent to roadway.
+    # Lacking temporal baseline/motion history, single-frame geometry must NOT default
+    # obstacles to dynamic. Tall structures (buildings, poles, trees, walls) whose column
+    # extent exceeds passenger vehicle height (> 2.30m) stay Static Obstacle (Class 2).
+    #
+    # Vectorized 2D column max-height profile (0.5m grid) to distinguish vehicle-scale obstacles:
+    bin_size = 0.5
+    gx = np.floor(x / bin_size).astype(np.int32)
+    gy = np.floor(y / bin_size).astype(np.int32)
+    col_id = (gx + 1000).astype(np.int64) * 2000 + (gy + 1000).astype(np.int64)
+
+    sort_order = np.argsort(col_id)
+    sorted_cols = col_id[sort_order]
+    sorted_h = height_above_ground[sort_order]
+
+    boundaries = np.where(sorted_cols[:-1] != sorted_cols[1:])[0] + 1
+    boundaries = np.concatenate(([0], boundaries, [len(sorted_cols)]))
+
+    max_h_per_col = np.maximum.reduceat(sorted_h, boundaries[:-1])
+    col_lengths = np.diff(boundaries)
+    point_max_h = np.repeat(max_h_per_col, col_lengths)
+
+    inv_sort = np.empty_like(sort_order)
+    inv_sort[sort_order] = np.arange(len(sort_order))
+    column_max_height = point_max_h[inv_sort]
+
+    # Vehicle-height ceiling constraint: true vehicles do not exceed 2.30m above ground
+    vehicle_height_mask = column_max_height <= 2.30
+
+    # Ego vehicle self-return exclusion: returns on ego vehicle hood/mirrors (r < 2.5m)
+    ego_exclusion_mask = r >= 2.5
+
     dynamic_candidate = (
         non_ground_mask &
-        (r >= 1.8) &
+        ego_exclusion_mask &
         (r <= 45.0) &
         (np.abs(y) <= (road_half_width_m + 0.3)) &
         (height_above_ground >= 0.35) &
-        (height_above_ground <= 2.20)
+        (height_above_ground <= 2.20) &
+        vehicle_height_mask
     )
     labels[dynamic_candidate] = 3
 

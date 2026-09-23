@@ -167,7 +167,7 @@ class SensorDegradationTracker:
         for key, cell in grid_map.items():
             # Extract spatial key (ring, angle) ignoring tier index to monitor sector density
             spatial_key = (key[1], key[2])
-            
+
             if cell.point_count < self.min_points:
                 self.low_density_counts[spatial_key] = self.low_density_counts.get(spatial_key, 0) + 1
             else:
@@ -180,3 +180,75 @@ class SensorDegradationTracker:
                 cell.resolution_tier = 0.50  # Force coarsest tier
 
         return grid_map
+
+
+class ZClipHysteresisFilter:
+    """
+    Suppresses cell flicker caused by LiDAR z-outliers near the roof_height_m
+    clipping plane.
+
+    Problem: when a LiDAR return grazes an overpass or tree canopy, its z-value
+    oscillates slightly above/below ``roof_height_m`` between frames.  Because
+    the grid is rebuilt from scratch each frame, the affected cell alternates
+    between "present" (z below clip) and "absent" (z above clip), which the
+    dashboard renders as a flickering cell.
+
+    Solution: track the maximum z seen per cell key across a rolling window.
+    A point is considered "above clip" only if it has been above
+    ``roof_height_m - margin_m`` for at least ``min_frames`` consecutive frames.
+    Within the margin band, previous behaviour (inside clip) is preserved.
+    """
+
+    def __init__(
+        self,
+        margin_m: float = 0.10,
+        min_frames: int = 2,
+    ) -> None:
+        """
+        Args:
+            margin_m:   Hysteresis band above ``roof_height_m``.  Points whose z
+                        is within ``[roof_height_m, roof_height_m + margin_m]``
+                        are treated as inside the clip plane until they have been
+                        consistently above it for ``min_frames`` frames.
+            min_frames: Minimum consecutive frames a point must be above
+                        ``roof_height_m`` before it is clipped out.
+        """
+        self.margin_m = margin_m
+        self.min_frames = min_frames
+        # Maps spatial_key -> consecutive frames above clip-plane count
+        self._above_counts: Dict[Tuple[int, int], int] = {}
+
+    def should_clip(self, spatial_key: Tuple[int, int], z_max: float, roof_height_m: float) -> bool:
+        """
+        Returns True if the cell at spatial_key should be clipped (excluded) this frame.
+
+        Args:
+            spatial_key:    (ring_idx, angle_idx) or similar 2-tuple cell identifier.
+            z_max:          Maximum z-value seen in this cell this frame.
+            roof_height_m:  Nominal clip height.
+        """
+        hard_limit = roof_height_m + self.margin_m
+
+        if z_max > hard_limit:
+            # Clearly above even the hysteresis band — clip immediately
+            self._above_counts[spatial_key] = self._above_counts.get(spatial_key, 0) + 1
+            return True
+
+        if z_max > roof_height_m:
+            # In the hysteresis band — only clip if we've been here for min_frames
+            count = self._above_counts.get(spatial_key, 0) + 1
+            self._above_counts[spatial_key] = count
+            return count >= self.min_frames
+
+        # Below the clip plane — reset counter and do NOT clip
+        self._above_counts[spatial_key] = 0
+        return False
+
+    def reset_cell(self, spatial_key: Tuple[int, int]) -> None:
+        """Clears the running counter for a specific cell (e.g. after scene change)."""
+        self._above_counts.pop(spatial_key, None)
+
+    def reset_all(self) -> None:
+        """Clears all running counters (e.g. after a full sequence reset)."""
+        self._above_counts.clear()
+

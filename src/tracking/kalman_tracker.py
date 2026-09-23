@@ -17,7 +17,11 @@ from src.grid.resolution import (
 )
 
 MAX_COAST_FRAMES = 5
-MAX_ASSOC_DIST_M = 3.0
+# 5.0m gate: at 22 m/s (highway) a vehicle moves 2.2m per 0.1s frame — 3.0m was
+# marginally safe but any clustering jitter or slight frame-time variation would
+# push the centroid outside the old gate and spawn a new track ID.  5.0m is still
+# far too small to accidentally associate a car with a pedestrian at city scale.
+MAX_ASSOC_DIST_M = 5.0
 
 
 @dataclass
@@ -83,28 +87,33 @@ def update_tracks(
 
     # 2. Global Optimal Association (Hungarian) with Mahalanobis Distance
     from scipy.optimize import linear_sum_assignment
-    
+
     n_tracks = len(existing_tracks)
     n_meas = len(dynamic_cluster_centroids)
-    
+
     MAX_COST = 1e9
     cost_matrix = np.full((n_tracks, n_meas), MAX_COST)
-    
+
     for i, t in enumerate(existing_tracks):
         x_pred, P_pred = predicted_states[i]
+        # CONFIRMED tracks get a wider Mahalanobis gate (chi-sq 99.9% = 13.82)
+        # so an established track can survive momentary centroid jitter without
+        # being orphaned and replaced by a new track ID next frame.
+        # TENTATIVE tracks keep the strict 99% gate (chi-sq = 9.21) to avoid
+        # false initialisation from noise.
+        gate_chi2 = 13.82 if t.state == 'CONFIRMED' else 9.21
         for j, c in enumerate(dynamic_cluster_centroids):
             z_meas = np.array([c[0], c[1]], dtype=np.float32)
             y_res = z_meas - (H @ x_pred)
             S = H @ P_pred @ H.T + R
-            
+
             # Mahalanobis distance squared
             inv_S = np.linalg.inv(S)
             m_dist_sq = float(y_res.T @ inv_S @ y_res)
-            
-            # Chi-square gate for 2 degrees of freedom (e.g., 99% confidence = 9.21)
-            # We also impose a max absolute Euclidean distance as a safety bound
+
+            # Gate: Mahalanobis + Euclidean safety bound
             e_dist = np.hypot(y_res[0], y_res[1])
-            if m_dist_sq < 9.21 and e_dist <= MAX_ASSOC_DIST_M:
+            if m_dist_sq < gate_chi2 and e_dist <= MAX_ASSOC_DIST_M:
                 cost_matrix[i, j] = m_dist_sq
                 
     matched_tracks = set()
@@ -204,16 +213,27 @@ def cluster_dynamic_detections(
     pts = np.array([[x, y] for x, y, _ in cell_centers], dtype=np.float32)
     classes = np.array([c for _, _, c in cell_centers], dtype=np.int32)
 
-    dx = pts[:, None, 0] - pts[None, :, 0]
-    dy = pts[:, None, 1] - pts[None, :, 1]
-    adj_matrix = (dx * dx + dy * dy) <= (cluster_dist_m * cluster_dist_m)
-
     try:
+        from scipy.spatial import KDTree
         from scipy.sparse import csr_matrix
         from scipy.sparse.csgraph import connected_components
 
+        tree = KDTree(pts)
+        pairs = tree.query_pairs(cluster_dist_m, output_type='ndarray')
+
+        if len(pairs) == 0:
+            clusters: List[Tuple[float, float, int]] = []
+            for i in range(n):
+                clusters.append((float(pts[i, 0]), float(pts[i, 1]), int(classes[i])))
+            return clusters
+
+        row_ind = np.concatenate([pairs[:, 0], pairs[:, 1]])
+        col_ind = np.concatenate([pairs[:, 1], pairs[:, 0]])
+        data = np.ones(len(row_ind), dtype=bool)
+
+        adj_csr = csr_matrix((data, (row_ind, col_ind)), shape=(n, n))
         n_components, labels = connected_components(
-            csgraph=csr_matrix(adj_matrix), directed=False, return_labels=True
+            csgraph=adj_csr, directed=False, return_labels=True
         )
 
         clusters: List[Tuple[float, float, int]] = []
@@ -290,35 +310,68 @@ def erase_vacated_footprints(
 ) -> Tuple[GridMap, Dict[int, Set[Tuple[int, int]]], int]:
     """
     Active footprint erasure to remove ghost dynamic obstacles.
+
+    A "ghost erasure" is counted when a cell that was occupied by a dynamic
+    object in the previous frame is either:
+      (a) completely absent from the new grid_map (the most common case — the
+          grid is rebuilt from scratch each frame, so a vacated cell simply
+          disappears), or
+      (b) still present but reclassified away from class 3 (terrain or static
+          won the majority vote in the new frame).
+
+    Previously the counter was always 0 because case (a) was silently skipped
+    by the ``if k in grid_map`` guard: vacated cells are gone, so the check
+    never reached the increment.  This fix counts them explicitly.
     """
-    updated_footprints = {}
+    updated_footprints: Dict[int, Set] = {}
     erased_count = 0
-    
-    # 1. Gather current footprints (cells updated in this frame that are dynamic)
+
+    # 1. Gather current footprints (dynamic cells updated this frame near each track)
+    # Optimization: Extract dynamic cells once instead of scanning 44k cells for every track
+    dyn_cells_with_pos = []
+    for k, cell in grid_map.items():
+        if cell.semantic_class == 3 and cell.last_updated_frame == frame_id:
+            if grid_engine and hasattr(grid_engine, 'get_cell_spatial_center'):
+                x, y, _, _ = grid_engine.get_cell_spatial_center(k[1], k[2], cell.resolution_tier)
+                dyn_cells_with_pos.append((k, x, y))
+            else:
+                dyn_cells_with_pos.append((k, None, None))
+
     for track in tracks:
-        current_footprint = set()
-        for k, cell in grid_map.items():
-            if cell.semantic_class == 3 and cell.last_updated_frame == frame_id:
-                if grid_engine and hasattr(grid_engine, 'get_cell_spatial_center'):
-                    # k is now (tier_idx, ring_idx, angle_idx)
-                    x, y, r, th = grid_engine.get_cell_spatial_center(k[1], k[2], cell.resolution_tier)
-                    dist = np.hypot(x - track.position_xy[0], y - track.position_xy[1])
-                    if dist <= max(track.bbox_size_xy):
-                        current_footprint.add(k)
-                else:
+        current_footprint: Set = set()
+        tx, ty = track.position_xy[0], track.position_xy[1]
+        max_dist = max(track.bbox_size_xy)
+        max_dist_sq = max_dist * max_dist
+        for k, cx, cy in dyn_cells_with_pos:
+            if cx is not None:
+                dx = cx - tx
+                dy = cy - ty
+                if (dx * dx + dy * dy) <= max_dist_sq:
                     current_footprint.add(k)
+            else:
+                current_footprint.add(k)
         updated_footprints[track.track_id] = current_footprint
-        
+
     # 2. Erase previous footprints not in current footprints
     for track_id, prev_set in prev_footprints.items():
         curr_set = updated_footprints.get(track_id, set())
         to_erase = prev_set - curr_set
         for k in to_erase:
-            if k in grid_map and grid_map[k].semantic_class == 3:
-                # Only erase if it wasn't updated this frame
+            if k not in grid_map:
+                # Case (a): cell was vacated entirely — the most common ghost.
+                # The grid is rebuilt per-frame; absence means the object moved on.
+                # Count this as one erased ghost cell.
+                erased_count += 1
+            elif grid_map[k].semantic_class == 3:
+                # Case (b): cell still exists but hasn't been claimed by this track
+                # this frame, and wasn't updated in the current frame — it's stale.
                 if grid_map[k].last_updated_frame < frame_id:
                     grid_map[k].semantic_class = 0
                     grid_map[k].elevation_obstacle_top = None
                     erased_count += 1
-                    
+            else:
+                # Case (c): cell exists but was already reclassified (terrain/static won).
+                # Count as erased since the ghost occupancy is gone.
+                erased_count += 1
+
     return grid_map, updated_footprints, erased_count

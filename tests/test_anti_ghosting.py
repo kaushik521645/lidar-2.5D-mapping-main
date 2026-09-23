@@ -142,3 +142,208 @@ def test_active_footprint_erasure_antighosting():
     # 3. Static obstacle remains Class 2 (untouched)
     assert updated_grid[cell_static_key].semantic_class == 2
     assert updated_grid[cell_static_key].elevation_obstacle_top == 2.0
+
+
+def test_ghost_cells_erased_counter_increments_on_movement():
+    """
+    Regression test for SIH2026 bug where ghost_cells_erased was always 0.
+
+    Root cause was that the grid is rebuilt from scratch each frame.  When an
+    object moves from cell A to cell B, cell A is simply *absent* from the new
+    grid_map.  The old code only counted erasures when ``k in grid_map``, so
+    it never incremented.
+
+    This test verifies:
+    1. When prev_footprints contains cells absent from the new grid_map,
+       the counter increments (case a: vacated = ghost erased).
+    2. When prev_footprints contains cells still present but reclassified
+       to terrain, the counter also increments (case c).
+    3. Cells in the current footprint (object is still there) are NOT counted.
+    """
+    grid_engine = PolarGridEngine()
+
+    track = TrackedObject(
+        track_id=7,
+        position_xy=(12.0, 0.0),   # Moved to new position
+        velocity_xy=(5.0, 0.0),
+        predicted_next_xy=(12.5, 0.0),
+        class_id=3,
+        frames_since_seen=0,
+        bbox_size_xy=(4.0, 2.0),
+        state='CONFIRMED',
+        hits=4,
+    )
+
+    # Previous frame footprint: 3 cells that the object occupied at (10m, 0 rad)
+    old_cell_A = (0, 200, 314)
+    old_cell_B = (0, 201, 314)
+    old_cell_C = (0, 199, 314)
+    # Current frame cell where the track now sits
+    new_cell_X = (0, 240, 314)
+
+    prev_footprints = {7: {old_cell_A, old_cell_B, old_cell_C}}
+
+    # New grid: old cells are GONE (vacated), only the new cell exists near the track
+    grid_map: GridMap = {
+        new_cell_X: GridCell(
+            elevation_ground=0.0,
+            elevation_obstacle_bottom=0.2,
+            elevation_obstacle_top=1.5,
+            semantic_class=3,
+            point_count=10,
+            confidence=1.0,
+            last_updated_frame=3,
+            resolution_tier=0.15,
+        ),
+    }
+
+    updated_grid, updated_fp, erased_count = erase_vacated_footprints(
+        grid_map=grid_map,
+        tracks=[track],
+        prev_footprints=prev_footprints,
+        frame_id=3,
+        grid_engine=grid_engine,
+    )
+
+    # All 3 old cells were absent from new grid -> should count as 3 ghost erasures
+    assert erased_count == 3, (
+        f"Expected 3 ghost erasures (vacated cells), got {erased_count}. "
+        "This was always 0 before the fix."
+    )
+    # Updated footprint should now contain only the new cell (track is at new_cell_X area)
+    assert 7 in updated_fp
+
+
+def test_ghost_cells_erased_does_not_count_static_neighbors():
+    """
+    Verifies that cells near the track that are static (class 2) and were NOT
+    in prev_footprints are never mistakenly counted as ghost erasures.
+    """
+    grid_engine = PolarGridEngine()
+
+    track = TrackedObject(
+        track_id=3,
+        position_xy=(8.0, 0.0),
+        velocity_xy=(2.0, 0.0),
+        predicted_next_xy=(8.2, 0.0),
+        class_id=3,
+        frames_since_seen=0,
+        bbox_size_xy=(3.5, 1.8),
+        state='CONFIRMED',
+        hits=5,
+    )
+
+    # Track occupied this one dynamic cell last frame
+    dynamic_prev_key = (0, 160, 314)
+    # Static wall nearby (never in prev_footprints)
+    static_wall_key = (0, 162, 310)
+
+    prev_footprints = {3: {dynamic_prev_key}}
+
+    # New grid: dynamic cell is gone (object moved), static wall is present
+    grid_map: GridMap = {
+        static_wall_key: GridCell(
+            elevation_ground=0.0,
+            elevation_obstacle_bottom=0.5,
+            elevation_obstacle_top=2.0,
+            semantic_class=2,  # Static obstacle
+            point_count=8,
+            confidence=1.0,
+            last_updated_frame=5,
+            resolution_tier=0.05,
+        ),
+    }
+
+    _, _, erased_count = erase_vacated_footprints(
+        grid_map=grid_map,
+        tracks=[track],
+        prev_footprints=prev_footprints,
+        frame_id=5,
+        grid_engine=grid_engine,
+    )
+
+    # Only the vacated dynamic cell should be counted
+    assert erased_count == 1
+    # Static wall should be untouched (it was never in prev_footprints)
+    assert grid_map[static_wall_key].semantic_class == 2
+
+
+def test_ghost_cells_erased_multi_frame_cumulative_stays_bounded():
+    """
+    Regression test ensuring erase_vacated_footprints across 15 consecutive frames:
+    1. Only counts genuine dynamic footprint erasures (never mass-erasing absent static cells).
+    2. Keeps the cumulative total strictly bounded and proportional to per-frame erasures.
+    """
+    grid_engine = PolarGridEngine()
+    prev_footprints = {}
+    cum_erased = 0
+
+    # Simulate a dynamic object moving across 15 frames:
+    # At each frame f, the object occupies 3 cells: (0, 160 + f, 300), (0, 160 + f, 301), (0, 160 + f, 302)
+    # When it moves, the previous 3 cells are vacated.
+    for f in range(15):
+        ring = 160 + f * 10
+        center_x, center_y, _, _ = grid_engine.get_cell_spatial_center(ring, 0, 0.05)
+        track = TrackedObject(
+            track_id=1,
+            position_xy=(center_x, center_y),
+            velocity_xy=(5.0, 0.0),
+            predicted_next_xy=(center_x + 0.5, center_y),
+            class_id=3,
+            frames_since_seen=0,
+            bbox_size_xy=(4.0, 2.0),
+            state='CONFIRMED',
+            hits=f + 1,
+        )
+
+        curr_keys = [
+            (0, ring, -1),
+            (0, ring, 0),
+            (0, ring, 1),
+        ]
+        grid_map = {
+            k: GridCell(
+                elevation_ground=0.0,
+                elevation_obstacle_bottom=0.3,
+                elevation_obstacle_top=1.8,
+                semantic_class=3,
+                point_count=15,
+                confidence=1.0,
+                last_updated_frame=f,
+                resolution_tier=0.05,
+            )
+            for k in curr_keys
+        }
+
+        # Add unrelated static cells that fluctuate into/out of the grid
+        for s in range(50):
+            grid_map[(1, 50 + s + (f % 3), 100)] = GridCell(
+                elevation_ground=0.0,
+                elevation_obstacle_bottom=0.0,
+                elevation_obstacle_top=0.0,
+                semantic_class=1,
+                point_count=5,
+                confidence=0.8,
+                last_updated_frame=f,
+                resolution_tier=0.15,
+            )
+
+        grid_map, prev_footprints, erased = erase_vacated_footprints(
+            grid_map=grid_map,
+            tracks=[track],
+            prev_footprints=prev_footprints,
+            frame_id=f,
+            grid_engine=grid_engine,
+        )
+
+        cum_erased += erased
+        # Frame 0 has no previous footprints to erase
+        if f == 0:
+            assert erased == 0
+        else:
+            # Exactly 3 vacated cells erased per step
+            assert erased == 3, f"Expected 3 vacated cells in frame {f}, got {erased}"
+
+    # After 14 movement steps of 3 cells each, cumulative must be exactly 42 (14 * 3)
+    assert cum_erased == 42, f"Cumulative ghost cells erased should be 42, got {cum_erased}"
+

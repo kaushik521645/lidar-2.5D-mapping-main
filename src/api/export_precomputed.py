@@ -19,8 +19,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 from src.ingestion.kitti_loader import KITTILoader
 from src.perception.segment import segment_points
 from src.perception.class_map import map_semantickitti_to_4class
-from src.perception.heuristic_fallback import heuristic_segment_points
-from src.grid.grid_engine import PolarGridEngine
+from src.perception.heuristic_fallback import heuristic_segment_points, warmup_heuristic_jit
+from src.grid.grid_engine import PolarGridEngine, warmup_jit
 from src.grid.grid_types import VehicleState, GridCell
 from src.grid.foveation import (
     BASE_FINE_RADIUS,
@@ -89,6 +89,8 @@ def process_sequence_to_json(
     """
     Runs full FoveaMap perception, grid binning, and tracking over a frame sequence.
     """
+    warmup_jit()
+    warmup_heuristic_jit()
     engine = PolarGridEngine()
     tracker = KalmanTrackerManager()
     prev_footprints: Dict[int, Any] = {}

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-@dataclass
+@dataclass(slots=True)
 class GridCell:
     """Represents one cell in a variable-resolution 2.5D polar grid.
 
