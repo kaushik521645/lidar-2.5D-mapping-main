@@ -3,6 +3,11 @@
 # Single source of truth for all tunable constants in the perception pipeline.
 # ==============================================================================
 
+ingestion:
+  velodyne_zip: "data_odometry_velodyne.zip"
+  velodyne_extract_dir: "data/data_odometry_velodyne"
+  max_scan_cache_mb: 256
+
 grid:
   # Static Resolution Tiers: list of [max_range_m, cell_size_m]
   resolution_tiers:

@@ -72,10 +72,39 @@ class FoveaRenderer3D {
       opacity: 0.92,
     });
 
+    // High-Performance InstancedMesh Pools
+    this.initialCapacity = 4096;
+    this.dummy = new THREE.Object3D();
+    this.instancedMeshes = {};
+    const allMeshKeys = ['0', '1', '2', '3', '-1', 'overhang'];
+    for (const k of allMeshKeys) {
+      const mat = k === 'overhang' ? this.overhangMaterial : (this.boxMaterials[k] || this.boxMaterials['-1']);
+      const im = new THREE.InstancedMesh(this.baseBoxGeo, mat, this.initialCapacity);
+      im.count = 0;
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.cellsGroup.add(im);
+      this.instancedMeshes[k] = im;
+    }
+
     // Resize Handler
     window.addEventListener('resize', () => this.onResize());
 
     this.animate();
+  }
+
+  ensureCapacity(key, neededCount) {
+    let im = this.instancedMeshes[key];
+    if (im.instanceMatrix.count < neededCount) {
+      this.cellsGroup.remove(im);
+      im.dispose();
+      const newCap = Math.max(neededCount * 2, im.instanceMatrix.count * 2);
+      const mat = key === 'overhang' ? this.overhangMaterial : (this.boxMaterials[key] || this.boxMaterials['-1']);
+      im = new THREE.InstancedMesh(this.baseBoxGeo, mat, newCap);
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.cellsGroup.add(im);
+      this.instancedMeshes[key] = im;
+    }
+    return im;
   }
 
   onResize() {
@@ -102,9 +131,9 @@ class FoveaRenderer3D {
   }
 
   clearScene() {
-    while (this.cellsGroup.children.length > 0) {
-      const obj = this.cellsGroup.children.pop();
-      if (obj.geometry && obj.geometry !== this.baseBoxGeo) obj.geometry.dispose();
+    for (const im of Object.values(this.instancedMeshes)) {
+      im.count = 0;
+      im.instanceMatrix.needsUpdate = true;
     }
     while (this.tracksGroup.children.length > 0) {
       const obj = this.tracksGroup.children.pop();
@@ -113,58 +142,97 @@ class FoveaRenderer3D {
   }
 
   renderFrame(frameData) {
-    this.clearScene();
-    if (!frameData || !frameData.cells) return;
+    if (!frameData || !frameData.cells) {
+      this.clearScene();
+      return;
+    }
 
     const cells = frameData.cells;
     const v_state = frameData.vehicle_state || { speed_mps: 0, steering_angle_rad: 0 };
     const fovea_cfg = frameData.foveation_params || { base_fine_radius_m: 10, max_stretch: 2.5, shear_strength: 0.6 };
 
-    // Update Foveation Dynamic Contour with Motion-Adaptive Lobes
-    this.polarOverlay.updateFoveationContour(
-      v_state.speed_mps,
-      v_state.steering_angle_rad,
-      fovea_cfg.base_fine_radius_m,
-      fovea_cfg.max_stretch,
-      frameData.tracks || [],
-      fovea_cfg.motion_foveation_enabled !== false,
-      fovea_cfg.motion_speed_threshold_mps || 0.8,
-      fovea_cfg.motion_lead_time_s || 1.0,
-      fovea_cfg.collision_focus_only !== false,
-      fovea_cfg.corridor_half_width_m || 3.2,
-      fovea_cfg.max_threat_distance_m || 35.0
-    );
+    // Update Foveation Contour: Prefer backend polyline for single source of truth
+    if (frameData.fovea_polyline && frameData.fovea_polyline.length > 0) {
+      this.polarOverlay.setContourPoints(frameData.fovea_polyline);
+    } else {
+      this.polarOverlay.updateFoveationContour(
+        v_state.speed_mps,
+        v_state.steering_angle_rad,
+        fovea_cfg.base_fine_radius_m,
+        fovea_cfg.max_stretch,
+        frameData.tracks || [],
+        fovea_cfg.motion_foveation_enabled !== false,
+        fovea_cfg.motion_speed_threshold_mps || 0.8,
+        fovea_cfg.motion_lead_time_s || 1.0,
+        fovea_cfg.collision_focus_only !== false,
+        fovea_cfg.corridor_half_width_m || 3.2,
+        fovea_cfg.max_threat_distance_m || 35.0,
+        fovea_cfg.shear_strength || 0.6
+      );
+    }
 
-    // Render 2.5D Cells
-    cells.forEach((cell) => {
+    // Count cells needed per instanced mesh class
+    const counts = { '0': 0, '1': 0, '2': 0, '3': 0, '-1': 0, 'overhang': 0 };
+    for (let i = 0; i < cells.length; i++) {
+      const c = cells[i];
+      const clsKey = c.semantic_class !== undefined && this.instancedMeshes[String(c.semantic_class)] ? String(c.semantic_class) : '-1';
+      counts[clsKey]++;
+      if (c.elevation_obstacle_bottom !== null && c.elevation_obstacle_top !== null) {
+        counts['overhang']++;
+      }
+    }
+
+    // Ensure capacity for all classes
+    for (const [k, cnt] of Object.entries(counts)) {
+      this.ensureCapacity(k, cnt);
+    }
+
+    // Update instance transforms
+    const indices = { '0': 0, '1': 0, '2': 0, '3': 0, '-1': 0, 'overhang': 0 };
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
       const x = cell.x || 0;
       const y = cell.y || 0;
       const res = cell.resolution_tier || 0.05;
       const cls = cell.semantic_class;
+      const clsKey = cls !== undefined && this.instancedMeshes[String(cls)] ? String(cls) : '-1';
       const z_ground = cell.elevation_ground !== undefined ? cell.elevation_ground : -1.5;
 
       // Ground slab
       const slabHeight = cls === 2 ? 1.5 : (cls === 3 ? 1.2 : 0.12);
-      const slabMesh = new THREE.Mesh(
-        this.baseBoxGeo,
-        this.boxMaterials[cls] || this.boxMaterials['-1']
-      );
-      slabMesh.scale.set(res * 0.95, res * 0.95, slabHeight);
-      slabMesh.position.set(x, y, z_ground + slabHeight / 2.0);
-      this.cellsGroup.add(slabMesh);
+      this.dummy.scale.set(res * 0.95, res * 0.95, slabHeight);
+      this.dummy.position.set(x, y, z_ground + slabHeight / 2.0);
+      this.dummy.updateMatrix();
 
-      // Multi-layer Overhang Render
+      const im = this.instancedMeshes[clsKey];
+      im.setMatrixAt(indices[clsKey]++, this.dummy.matrix);
+
+      // Overhang slab
       if (cell.elevation_obstacle_bottom !== null && cell.elevation_obstacle_top !== null) {
         const obs_bottom = cell.elevation_obstacle_bottom;
         const obs_top = cell.elevation_obstacle_top;
         const obs_height = Math.max(0.2, obs_top - obs_bottom);
 
-        const overhangMesh = new THREE.Mesh(this.baseBoxGeo, this.overhangMaterial);
-        overhangMesh.scale.set(res * 0.95, res * 0.95, obs_height);
-        overhangMesh.position.set(x, y, obs_bottom + obs_height / 2.0);
-        this.cellsGroup.add(overhangMesh);
+        this.dummy.scale.set(res * 0.95, res * 0.95, obs_height);
+        this.dummy.position.set(x, y, obs_bottom + obs_height / 2.0);
+        this.dummy.updateMatrix();
+
+        const ohIm = this.instancedMeshes['overhang'];
+        ohIm.setMatrixAt(indices['overhang']++, this.dummy.matrix);
       }
-    });
+    }
+
+    // Apply updated instance counts and notify GPU
+    for (const [k, im] of Object.entries(this.instancedMeshes)) {
+      im.count = indices[k];
+      im.instanceMatrix.needsUpdate = true;
+    }
+
+    // Render Tracked Objects (Bounding Box + Velocity Vector)
+    while (this.tracksGroup.children.length > 0) {
+      const obj = this.tracksGroup.children.pop();
+      if (obj.geometry) obj.geometry.dispose();
+    }
 
     // Render Tracked Objects (Bounding Box + Velocity Vector)
     if (frameData.tracks) {

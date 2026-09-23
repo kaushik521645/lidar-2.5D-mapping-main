@@ -10,6 +10,10 @@ class PolarGridOverlay {
 
     this.foveaLine = null;
     this.foveaMesh = null;
+    // EMA smoothing: retain previous buffer positions to lerp between frames.
+    // alpha=0 → instant snap; alpha=1 → never updates. 0.35 gives a ~3-frame lag.
+    this._foveaSmoothAlpha = 0.35;
+    this._prevFoveaPositions = null;
     this.initStaticRings();
     this.initFoveationMesh();
   }
@@ -82,6 +86,43 @@ class PolarGridOverlay {
     this.gridGroup.add(this.foveaLine);
   }
 
+  setContourPoints(polyline) {
+    if (!this.foveaLine || !Array.isArray(polyline) || polyline.length === 0) return;
+    const positions = this.foveaLine.geometry.attributes.position.array;
+    const maxPts = positions.length / 3;
+    const n = Math.min(polyline.length, maxPts);
+    const alpha = this._foveaSmoothAlpha;
+    const prev = this._prevFoveaPositions;
+    const usePrev = prev !== null && prev.length === positions.length;
+
+    for (let i = 0; i < n; i++) {
+      const tx = polyline[i][0];
+      const ty = polyline[i][1];
+      if (usePrev) {
+        positions[i * 3]     = prev[i * 3]     * alpha + tx * (1 - alpha);
+        positions[i * 3 + 1] = prev[i * 3 + 1] * alpha + ty * (1 - alpha);
+      } else {
+        positions[i * 3]     = tx;
+        positions[i * 3 + 1] = ty;
+      }
+      positions[i * 3 + 2] = -1.48;
+    }
+    // Close the loop back to the first point
+    if (n < maxPts) {
+      positions[n * 3]     = positions[0];
+      positions[n * 3 + 1] = positions[1];
+      positions[n * 3 + 2] = -1.48;
+    }
+
+    // Persist smoothed positions for next frame
+    if (!this._prevFoveaPositions) {
+      this._prevFoveaPositions = new Float32Array(positions.length);
+    }
+    this._prevFoveaPositions.set(positions);
+
+    this.foveaLine.geometry.attributes.position.needsUpdate = true;
+  }
+
   updateFoveationContour(
     speed_mps,
     steering_angle_rad,
@@ -93,7 +134,8 @@ class PolarGridOverlay {
     motionLeadTime = 1.0,
     collisionFocusOnly = true,
     corridorHalfWidthM = 3.2,
-    maxThreatDistanceM = 35.0
+    maxThreatDistanceM = 35.0,
+    shear_strength = 0.6
   ) {
     if (!this.foveaLine) return;
 
@@ -107,14 +149,15 @@ class PolarGridOverlay {
 
     const a = base_radius * stretch;
     const b = base_radius;
+    const tau = 2 * Math.PI;
 
     for (let i = 0; i <= segments; i++) {
       const theta = (i / segments) * Math.PI * 2 - Math.PI;
 
-      // Angle relative to steering direction
-      let d_theta = theta - steering_angle_rad;
-      d_theta = ((d_theta + Math.PI) % (2 * Math.PI)) - Math.PI;
-      if (d_theta < -Math.PI) d_theta += 2 * Math.PI;
+      // Angle relative to steering direction with shear sensitivity and correct wrap
+      let d_theta = theta - (steering_angle_rad * shear_strength);
+      d_theta = ((d_theta % tau) + tau) % tau;
+      if (d_theta > Math.PI) d_theta -= tau;
 
       const is_forward = Math.abs(d_theta) < (Math.PI / 2.0);
 
@@ -219,10 +262,23 @@ class PolarGridOverlay {
       const y = r * Math.sin(theta);
       const z = -1.48;
 
-      positions[i * 3] = x;
-      positions[i * 3 + 1] = y;
+      const alpha = this._foveaSmoothAlpha;
+      const prev = this._prevFoveaPositions;
+      if (prev !== null && prev.length === positions.length) {
+        positions[i * 3]     = prev[i * 3]     * alpha + x * (1 - alpha);
+        positions[i * 3 + 1] = prev[i * 3 + 1] * alpha + y * (1 - alpha);
+      } else {
+        positions[i * 3]     = x;
+        positions[i * 3 + 1] = y;
+      }
       positions[i * 3 + 2] = z;
     }
+
+    // Persist smoothed positions for next frame
+    if (!this._prevFoveaPositions) {
+      this._prevFoveaPositions = new Float32Array(positions.length);
+    }
+    this._prevFoveaPositions.set(positions);
 
     this.foveaLine.geometry.attributes.position.needsUpdate = true;
   }

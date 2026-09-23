@@ -25,6 +25,7 @@ from src.grid.grid_types import VehicleState, GridCell
 from src.grid.foveation import (
     BASE_FINE_RADIUS,
     MAX_STRETCH,
+    SHEAR_STRENGTH,
     MOTION_FOVEATION_ENABLED,
     COLLISION_FOCUS_ONLY,
     CORRIDOR_HALF_WIDTH_M,
@@ -34,6 +35,7 @@ from src.grid.foveation import (
     MOTION_BUFFER_M,
     MOTION_ACUITY_BOOST,
     detect_moving_objects,
+    compute_fovea_polyline,
 )
 from src.tracking.kalman_tracker import (
     KalmanTrackerManager,
@@ -181,6 +183,20 @@ def process_sequence_to_json(
         moving_info = detect_moving_objects(all_tracks, speed_threshold_mps=MOTION_SPEED_THRESHOLD_MPS)
         moving_count = sum(1 for m in moving_info if m["is_moving"])
 
+        fovea_poly = compute_fovea_polyline(
+            v_state,
+            active_tracks=all_tracks,
+            base_radius=BASE_FINE_RADIUS,
+            max_stretch=MAX_STRETCH,
+            shear_strength=SHEAR_STRENGTH,
+            motion_foveation_enabled=MOTION_FOVEATION_ENABLED,
+            motion_speed_threshold_mps=MOTION_SPEED_THRESHOLD_MPS,
+            motion_lead_time_s=MOTION_LEAD_TIME_S,
+            collision_focus_only=COLLISION_FOCUS_ONLY,
+            corridor_half_width_m=CORRIDOR_HALF_WIDTH_M,
+            max_threat_distance_m=MAX_THREAT_DISTANCE_M,
+        )
+
         frame_data = {
             "frame_id": frame_id,
             "timestamp": float(meta.get("timestamp_s", frame_id * 0.1)),
@@ -193,6 +209,7 @@ def process_sequence_to_json(
             "foveation_params": {
                 "base_fine_radius_m": BASE_FINE_RADIUS,
                 "max_stretch": MAX_STRETCH,
+                "shear_strength": SHEAR_STRENGTH,
                 "motion_foveation_enabled": MOTION_FOVEATION_ENABLED,
                 "collision_focus_only": COLLISION_FOCUS_ONLY,
                 "corridor_half_width_m": CORRIDOR_HALF_WIDTH_M,
@@ -202,6 +219,7 @@ def process_sequence_to_json(
                 "motion_buffer_m": MOTION_BUFFER_M,
                 "motion_acuity_boost": MOTION_ACUITY_BOOST,
             },
+            "fovea_polyline": fovea_poly,
             "cells": cells_list,
             "tracks": [t.to_dict() for t in all_tracks],
             "metrics": {

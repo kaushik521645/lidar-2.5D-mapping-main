@@ -251,3 +251,34 @@ def test_motion_adaptive_grid_resolution_upgrade():
     for cell in grid_oncoming.values():
         assert cell.resolution_tier == pytest.approx(0.05, abs=1e-4)
 
+
+def test_compute_fovea_polyline():
+    """Verify compute_fovea_polyline produces 120 valid [x, y] coordinates."""
+    from src.grid.foveation import compute_fovea_polyline
+
+    state = VehicleState(speed_mps=15.0, steering_angle_rad=0.2)
+    poly = compute_fovea_polyline(state, num_samples=120)
+
+    assert len(poly) == 120
+    for pt in poly:
+        assert len(pt) == 2
+        assert isinstance(pt[0], float) and isinstance(pt[1], float)
+        # Radius should be between base_radius (10m) and stretched radius (~25m)
+        r = float(np.hypot(pt[0], pt[1]))
+        assert 9.5 <= r <= 26.0
+
+
+def test_foveation_shear_strength():
+    """Verify shear_strength modulates the steering deflection angle."""
+    from src.grid.foveation import fine_radius_at_angle
+
+    state = VehicleState(speed_mps=20.0, steering_angle_rad=0.4)
+    # With shear 1.0, maximum stretch is at 0.4 rad
+    r_full_shear = fine_radius_at_angle(0.4, state, shear_strength=1.0)
+    assert r_full_shear == pytest.approx(BASE_FINE_RADIUS_M * MAX_STRETCH, abs=1e-5)
+
+    # With shear 0.5, effective steering angle is 0.2 rad
+    r_half_shear = fine_radius_at_angle(0.2, state, shear_strength=0.5)
+    assert r_half_shear == pytest.approx(BASE_FINE_RADIUS_M * MAX_STRETCH, abs=1e-5)
+
+

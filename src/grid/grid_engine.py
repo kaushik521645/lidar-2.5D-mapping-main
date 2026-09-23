@@ -9,6 +9,7 @@ from typing import Dict, Any, Tuple, Optional, List
 from src.grid.grid_types import GridCell, GridMap, VehicleState
 from src.grid.resolution import get_resolution, angular_step, DEFAULT_RESOLUTION_TIERS
 from src.grid.foveation import fine_radius_at_angle, BASE_FINE_RADIUS_M
+from src.grid.hysteresis import BoundaryHysteresisManager
 
 
 def robust_z_split(z_array: np.ndarray, min_gap: float = 0.4) -> Tuple[float, Optional[float], Optional[float]]:
@@ -18,17 +19,17 @@ def robust_z_split(z_array: np.ndarray, min_gap: float = 0.4) -> Tuple[float, Op
     """
     if len(z_array) == 0:
         return 0.0, None, None
-        
+
     min_z = np.min(z_array)
     max_z = np.max(z_array)
-    
+
     if max_z - min_z < min_gap:
         return min_z, None, None
-        
-    # 1D 2-Means (Lloyd's)
+
+    # 1D 2-Means (Lloyd's algorithm, up to 5 iterations)
     c1, c2 = min_z, max_z
     mask = np.zeros(len(z_array), dtype=bool)
-    
+
     for _ in range(5):
         dist1 = np.abs(z_array - c1)
         dist2 = np.abs(z_array - c2)
@@ -36,31 +37,28 @@ def robust_z_split(z_array: np.ndarray, min_gap: float = 0.4) -> Tuple[float, Op
         if np.array_equal(mask, new_mask):
             break
         mask = new_mask
-        
+
         if np.sum(mask) == 0 or np.sum(~mask) == 0:
             break
-            
+
         c1 = np.mean(z_array[mask])
         c2 = np.mean(z_array[~mask])
-        
-    # mask corresponds to points closer to c1
+
     pts1 = z_array[mask]
     pts2 = z_array[~mask]
-    
+
     if len(pts1) == 0 or len(pts2) == 0:
         return min_z, None, None
-        
+
     if np.mean(pts1) < np.mean(pts2):
-        gnd_pts = pts1
-        obs_pts = pts2
+        gnd_pts, obs_pts = pts1, pts2
     else:
-        gnd_pts = pts2
-        obs_pts = pts1
-        
+        gnd_pts, obs_pts = pts2, pts1
+
     gap = np.min(obs_pts) - np.max(gnd_pts)
     if gap > min_gap:
         return float(np.min(gnd_pts)), float(np.min(obs_pts)), float(np.max(obs_pts))
-        
+
     return float(min_z), None, None
 
 
@@ -71,7 +69,8 @@ def project_to_grid(
     roof_height_m: float = 2.5,
     tiers: Optional[List[Tuple[float, float]]] = None,
     base_fine_radius: float = BASE_FINE_RADIUS_M,
-    active_tracks: Optional[list] = None
+    active_tracks: Optional[list] = None,
+    hysteresis_manager: Optional[BoundaryHysteresisManager] = None,
 ) -> GridMap:
     """
     Projects (N, 5) point cloud to a variable-resolution 2.5D GridMap.
@@ -105,7 +104,12 @@ def project_to_grid(
     fine_radii = fine_radius_at_angle(
         theta, vehicle_state, base_radius=base_fine_radius, active_tracks=active_tracks
     )
-    
+
+    # Damp frame-to-frame jitter of the dynamic foveation boundary so points near
+    # it don't flip resolution tier (and therefore flicker) every frame.
+    if hysteresis_manager is not None:
+        fine_radii = hysteresis_manager.smooth_fine_radius(theta, fine_radii)
+
     res = np.zeros_like(r)
     fine_mask = r < fine_radii
     res[fine_mask] = tiers[0][1]
@@ -215,8 +219,13 @@ def uniform_grid_baseline_bytes(radius_m: float = 100.0, cell_size_m: float = 0.
 # To prevent breaking existing pipeline code that expects PolarGridEngine.
 class PolarGridEngine:
     def __init__(self, config_path: str = "configs/default.yaml"):
-        pass
-        
+        # One hysteresis manager per engine instance so its per-sector boundary
+        # history persists across consecutive project_to_grid() calls (i.e. across
+        # frames of a sequence), which is required for it to actually suppress
+        # flicker. Previously this state was never created/threaded through, so
+        # the anti-flicker logic in hysteresis.py had no effect on the pipeline.
+        self.hysteresis_manager = BoundaryHysteresisManager()
+
     def project_to_grid(
         self,
         points: np.ndarray,
@@ -229,9 +238,10 @@ class PolarGridEngine:
         if vehicle_state is None:
             vehicle_state = VehicleState(0.0, 0.0)
         return project_to_grid(
-            points, vehicle_state, frame_id=frame_id, roof_height_m=roof_height_m, active_tracks=active_tracks
+            points, vehicle_state, frame_id=frame_id, roof_height_m=roof_height_m,
+            active_tracks=active_tracks, hysteresis_manager=self.hysteresis_manager,
         )
-        
+
     def get_cell_spatial_center(self, ring_idx: int, angle_idx: int, res: float) -> Tuple[float, float, float, float]:
         r = (ring_idx + 0.5) * res
         theta = (angle_idx + 0.5) * angular_step(res, r)

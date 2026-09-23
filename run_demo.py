@@ -21,6 +21,7 @@ import yaml
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from src.ingestion.kitti_loader import KITTILoader
+from src.ingestion.extract import ensure_velodyne_extracted
 from src.ingestion.sample_generator import generate_kitti_sample_dataset
 from src.api.export_precomputed import export_all_precomputed, export_kitti_sequence, export_synthetic_kitti_like
 from src.metrics.evaluator import run_full_evaluation
@@ -39,6 +40,13 @@ def main():
     args = parser.parse_args()
 
     active_seq = str(args.sequence).zfill(2)
+
+    extract_dir, did_extract = ensure_velodyne_extracted()
+    if extract_dir:
+        print(
+            f"[INFO] Velodyne data dir : {extract_dir}"
+            f"{' (extracted this run)' if did_extract else ' (on-disk, zip ignored if present)'}"
+        )
 
     # Step 1: Detect available datasets (Real KITTI Odometry Velodyne alongside SemanticKITTI Benchmark)
     kitti_loader = KITTILoader(sequence=active_seq)

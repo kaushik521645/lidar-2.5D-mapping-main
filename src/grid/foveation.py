@@ -251,6 +251,9 @@ def attention_modifier(
             diff = theta_rad - bearing
             diff = (diff + np.pi) % (2 * np.pi) - np.pi
             spike = reach * np.exp(-0.5 * (diff / sigma)**2)
+            vel_speed = float(np.hypot(vel[0], vel[1])) if vel is not None else 0.0
+            if vel_speed >= speed_threshold_mps and boost > 1.0:
+                spike = np.minimum(spike * boost, max_threat_distance_m) if isinstance(spike, np.ndarray) else min(float(spike * boost), max_threat_distance_m)
         else:
             ttheta = float(np.arctan2(ty, tx))
             has_velocity = vel is not None and (abs(vel[0]) > 1e-3 or abs(vel[1]) > 1e-3)
@@ -267,6 +270,8 @@ def attention_modifier(
                 diff = theta_rad - pred_theta
                 diff = (diff + np.pi) % (2 * np.pi) - np.pi
                 spike = reach * np.exp(-0.5 * (diff / sigma)**2)
+                if speed >= speed_threshold_mps and boost > 1.0:
+                    spike = np.minimum(spike * boost, max_threat_distance_m) if isinstance(spike, np.ndarray) else min(float(spike * boost), max_threat_distance_m)
             else:
                 diff = theta_rad - ttheta
                 diff = (diff + np.pi) % (2 * np.pi) - np.pi
@@ -287,6 +292,7 @@ def fine_radius_at_angle(
     base_radius: float = BASE_FINE_RADIUS_M,
     max_stretch: float = MAX_STRETCH,
     speed_ref: float = STRETCH_SPEED_REF_MPS,
+    shear_strength: Optional[float] = None,
     active_tracks: list = None,
     motion_foveation_enabled: Optional[bool] = None,
     motion_speed_threshold_mps: Optional[float] = None,
@@ -311,6 +317,7 @@ def fine_radius_at_angle(
         corridor_half_width_m = CORRIDOR_HALF_WIDTH_M
     if max_threat_distance_m is None:
         max_threat_distance_m = MAX_THREAT_DISTANCE_M
+    effective_shear = 1.0 if shear_strength is None else float(shear_strength)
 
     stretch = stretch_factor(state.speed_mps, max_stretch, speed_ref)
     
@@ -318,8 +325,8 @@ def fine_radius_at_angle(
     a = base_radius * stretch
     b = base_radius
     
-    # Angle relative to steering direction
-    d_theta = theta_rad - state.steering_angle_rad
+    # Angle relative to steering direction with shear sensitivity
+    d_theta = theta_rad - (state.steering_angle_rad * effective_shear)
     d_theta = (d_theta + np.pi) % (2 * np.pi) - np.pi
     
     # Calculate True Ellipse in polar coordinates
@@ -357,5 +364,43 @@ def fine_radius_at_angle(
             r_fine = max(r_fine, r_attn)
             
     return r_fine
+
+
+def compute_fovea_polyline(
+    state: VehicleState,
+    active_tracks: Optional[list] = None,
+    num_samples: int = 120,
+    base_radius: float = BASE_FINE_RADIUS_M,
+    max_stretch: float = MAX_STRETCH,
+    shear_strength: float = 1.0,
+    motion_foveation_enabled: bool = True,
+    motion_speed_threshold_mps: float = MOTION_SPEED_THRESHOLD_MPS,
+    motion_lead_time_s: float = MOTION_LEAD_TIME_S,
+    collision_focus_only: bool = True,
+    corridor_half_width_m: float = CORRIDOR_HALF_WIDTH_M,
+    max_threat_distance_m: float = MAX_THREAT_DISTANCE_M,
+) -> List[List[float]]:
+    """
+    Samples fine_radius_at_angle at num_samples uniform angles from -pi to pi,
+    returning a closed polyline of [x, y] coordinates in the ego-vehicle coordinate frame.
+    """
+    angles = np.linspace(-np.pi, np.pi, num_samples, endpoint=True)
+    radii = fine_radius_at_angle(
+        angles,
+        state=state,
+        base_radius=base_radius,
+        max_stretch=max_stretch,
+        shear_strength=shear_strength,
+        active_tracks=active_tracks,
+        motion_foveation_enabled=motion_foveation_enabled,
+        motion_speed_threshold_mps=motion_speed_threshold_mps,
+        motion_lead_time_s=motion_lead_time_s,
+        collision_focus_only=collision_focus_only,
+        corridor_half_width_m=corridor_half_width_m,
+        max_threat_distance_m=max_threat_distance_m,
+    )
+    xs = radii * np.cos(angles)
+    ys = radii * np.sin(angles)
+    return [[round(float(x), 3), round(float(y), 3)] for x, y in zip(xs, ys)]
 
 

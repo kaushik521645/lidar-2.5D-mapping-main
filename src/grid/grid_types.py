@@ -18,10 +18,11 @@ class GridCell:
     obstacle layer (bottom/top), a semantic class label, and bookkeeping
     metadata used by the grid engine.
 
-    Semantic classes:
-        0 = Terrain
-        1 = Static Obstacle
-        2 = Dynamic Object
+    Semantic classes (4-Class Taxonomy):
+        0 = Drivable Terrain
+        1 = Non-Drivable Terrain
+        2 = Static Obstacle
+        3 = Dynamic Object
        -1 = Unknown / Unclassified
     """
 

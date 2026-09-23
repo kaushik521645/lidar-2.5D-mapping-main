@@ -45,6 +45,10 @@ class BoundaryHysteresisManager:
         self.hysteresis_margin_m = hysteresis_margin_m
         # Store previous tier per cell key or angular sector
         self.prev_cell_tiers: Dict[Tuple[int, int], float] = {}
+        # Store previous frame's fine/coarse foveation boundary radius per angular sector,
+        # used by smooth_fine_radius() to damp frame-to-frame jitter of the dynamic
+        # (track-driven) foveation boundary before it is ever compared against point ranges.
+        self.prev_fine_radius: Dict[int, float] = {}
 
     def get_tier_with_hysteresis(
         self,
@@ -76,6 +80,62 @@ class BoundaryHysteresisManager:
             self.prev_cell_tiers[cell_key] = tier
 
         return tier
+
+    def smooth_fine_radius(
+        self,
+        theta_rad: np.ndarray,
+        fine_radii_m: np.ndarray,
+        sector_width_rad: float = 0.02,
+    ) -> np.ndarray:
+        """
+        Damps frame-to-frame jitter of the dynamic fine/coarse foveation boundary
+        (`fine_radius_at_angle`) before it is used to split points into resolution
+        tiers.
+
+        Without this, the boundary is recomputed from scratch every frame (it
+        depends on ego speed/steering AND on live Kalman track positions), so a
+        point sitting a few centimeters from the boundary can flip between the
+        fine (0.05m) and coarse tiers on consecutive frames. Because grid cells
+        are rebuilt from scratch each frame, that flip changes which points get
+        aggregated together, which visibly flickers cell colors/classification
+        near the boundary even though nothing in the scene actually changed.
+
+        The boundary angle is bucketed into fixed-width angular sectors so the
+        same physical direction maps to the same history slot across frames.
+        Any change smaller than `hysteresis_margin_m` versus the previous frame's
+        boundary at that sector is suppressed (the old boundary is kept); larger
+        changes (e.g. a new track entering view) are allowed through immediately.
+        """
+        if theta_rad is None or (hasattr(theta_rad, "__len__") and len(theta_rad) == 0):
+            return fine_radii_m
+
+        theta_arr = np.atleast_1d(np.asarray(theta_rad, dtype=np.float64))
+        radii_arr = np.atleast_1d(np.asarray(fine_radii_m, dtype=np.float64))
+
+        sector_idx = np.round(theta_arr / sector_width_rad).astype(np.int64)
+
+        unique_sectors, inverse, counts = np.unique(
+            sector_idx, return_inverse=True, return_counts=True
+        )
+
+        # Representative (mean) boundary radius per angular sector this frame.
+        sector_sums = np.zeros(len(unique_sectors), dtype=np.float64)
+        np.add.at(sector_sums, inverse, radii_arr)
+        sector_means = sector_sums / counts
+
+        for i, sec in enumerate(unique_sectors):
+            new_r = float(sector_means[i])
+            prev_r = self.prev_fine_radius.get(int(sec))
+            if prev_r is not None and abs(new_r - prev_r) < self.hysteresis_margin_m:
+                new_r = prev_r
+            self.prev_fine_radius[int(sec)] = new_r
+            sector_means[i] = new_r
+
+        smoothed = sector_means[inverse]
+
+        if np.isscalar(fine_radii_m) or (hasattr(fine_radii_m, "shape") and fine_radii_m.shape == ()):
+            return float(smoothed[0])
+        return smoothed
 
     def update_grid_history(self, grid_map: GridMap) -> None:
         """Updates internal history from the current frame's GridMap."""

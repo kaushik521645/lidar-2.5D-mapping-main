@@ -1,5 +1,11 @@
 data/**
+!data/precomputed/.gitkeep
 *.zip
+**/__pycache__
+venv
+.vscode
+.env
+*.rar
 **/__pycache__
 venv
 .vscode

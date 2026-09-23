@@ -11,8 +11,15 @@ import os
 import re
 import glob
 import zipfile
-from typing import Optional, List, Tuple, Union
+from typing import Optional, List, Tuple, Union, Iterator
 import numpy as np
+
+from src.ingestion.extract import (
+    DEFAULT_EXTRACT_DIR,
+    ensure_velodyne_extracted,
+    extract_dir_has_scans,
+    find_velodyne_zip,
+)
 
 
 def load_velodyne_bin(bin_path: str) -> np.ndarray:
@@ -119,22 +126,24 @@ class KITTILoader:
 
     @staticmethod
     def _resolve_dataset_path(path: Optional[str]) -> str:
-        """Resolves provided path or falls back to best available dataset in project."""
-        if path and os.path.exists(path):
-            return path
-        
-        # Priority 1: Provided real KITTI ododyne zip archive
-        zip_candidates = [
-            "data_odometry_velodyne.zip",
-            os.path.join(os.path.dirname(__file__), "../../data_odometry_velodyne.zip"),
-            "data/data_odometry_velodyne.zip",
-        ]
-        for candidate in zip_candidates:
-            abs_c = os.path.abspath(candidate)
-            if os.path.exists(abs_c):
-                return abs_c
+        """Resolves provided path, preferring an extracted directory over the zip."""
+        if path:
+            abs_p = os.path.abspath(path)
+            if os.path.isdir(abs_p):
+                return abs_p
+            if os.path.isfile(abs_p) and zipfile.is_zipfile(abs_p):
+                extract_dir, _ = ensure_velodyne_extracted(zip_path=abs_p)
+                if extract_dir and extract_dir_has_scans(extract_dir):
+                    return extract_dir
+                return abs_p
 
-        # Priority 2: Extracted real KITTI directory
+        extract_dir = os.path.abspath(DEFAULT_EXTRACT_DIR)
+        zip_path = find_velodyne_zip()
+        if zip_path or extract_dir_has_scans(extract_dir):
+            resolved, _ = ensure_velodyne_extracted(zip_path=zip_path, extract_dir=extract_dir)
+            if resolved and extract_dir_has_scans(resolved):
+                return resolved
+
         dir_candidates = [
             "data_odometry_velodyne",
             "data/data_odometry_velodyne",
@@ -144,10 +153,11 @@ class KITTILoader:
         ]
         for candidate in dir_candidates:
             abs_c = os.path.abspath(candidate)
-            if os.path.exists(abs_c):
+            if os.path.isdir(abs_c) and extract_dir_has_scans(abs_c):
+                return abs_c
+            if os.path.isdir(abs_c):
                 return abs_c
 
-        # Priority 3: Synthetic procedural stand-in
         synthetic_candidates = [
             "data/synthetic_kitti_like",
             "data/kitti_sample",
@@ -157,7 +167,8 @@ class KITTILoader:
             if os.path.exists(abs_c):
                 return abs_c
 
-        # Default fallback
+        if zip_path:
+            return zip_path
         return path or "data_odometry_velodyne.zip"
 
     def _discover_files(self) -> None:
@@ -282,6 +293,22 @@ class KITTILoader:
         self._discover_files()
         return self
 
+    def iter_playlist(
+        self,
+        sequences: Optional[List[str]] = None,
+    ) -> Iterator[Tuple[str, int]]:
+        """Yields (sequence_id, frame_idx) across sequences without loading scans."""
+        seqs = sequences if sequences is not None else self.list_sequences()
+        original = self.sequence
+        try:
+            for seq in seqs:
+                self.set_sequence(seq)
+                for idx in range(len(self.bin_files)):
+                    yield seq, idx
+        finally:
+            if self.sequence != original:
+                self.set_sequence(original)
+
     def list_sequences(self) -> List[str]:
         """Returns list of sequence IDs available in this dataset."""
         if self.is_zip:
@@ -297,6 +324,51 @@ class KITTILoader:
             if os.path.exists(seq_dir):
                 return sorted([d for d in os.listdir(seq_dir) if os.path.isdir(os.path.join(seq_dir, d))])
         return [self.sequence]
+
+    def vehicle_state_at(self, idx: int, dt_s: float = 0.1) -> "VehicleState":
+        """Best-effort ego kinematics from poses.txt if present; else a stable default."""
+        from src.grid.grid_types import VehicleState
+
+        poses = self._load_poses()
+        if poses is None or idx >= len(poses):
+            return VehicleState(speed_mps=10.0, steering_angle_rad=0.0)
+
+        t = poses[idx]
+        if idx > 0:
+            prev = poses[idx - 1]
+            dx = float(t[0, 3] - prev[0, 3])
+            dy = float(t[1, 3] - prev[1, 3])
+            speed = float(np.hypot(dx, dy) / max(dt_s, 1e-3))
+            yaw = float(np.arctan2(t[1, 0], t[0, 0]))
+            prev_yaw = float(np.arctan2(prev[1, 0], prev[0, 0]))
+            d_yaw = (yaw - prev_yaw + np.pi) % (2 * np.pi) - np.pi
+            steer = float(np.clip(d_yaw, -0.8, 0.8))
+            return VehicleState(speed_mps=speed, steering_angle_rad=steer)
+        return VehicleState(speed_mps=10.0, steering_angle_rad=0.0)
+
+    def _load_poses(self) -> Optional[np.ndarray]:
+        if getattr(self, "_poses_cache_seq", None) == self.sequence and getattr(self, "_poses", None) is not None:
+            return self._poses
+        self._poses_cache_seq = self.sequence
+        self._poses = None
+        if self.is_zip:
+            return None
+        candidates = [
+            os.path.join(self.dataset_path, "dataset", "poses", f"{self.sequence}.txt"),
+            os.path.join(self.dataset_path, "poses", f"{self.sequence}.txt"),
+            os.path.join(self.dataset_path, "dataset", "sequences", self.sequence, "poses.txt"),
+            os.path.join(self.dataset_path, "sequences", self.sequence, "poses.txt"),
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                raw = np.loadtxt(p)
+                if raw.ndim == 1:
+                    raw = raw.reshape(1, -1)
+                if raw.shape[1] >= 12:
+                    mats = raw[:, :12].reshape(-1, 3, 4)
+                    self._poses = mats
+                    return self._poses
+        return None
 
     def __len__(self) -> int:
         return len(self.bin_files)

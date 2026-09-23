@@ -250,7 +250,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       overrideParams.motion_lead_time_s,
       overrideParams.collision_focus_only !== false,
       3.2,
-      35.0
+      35.0,
+      overrideParams.shear_strength
     );
 
     // If WebSocket is active, send live params
@@ -380,6 +381,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     frameData.foveation_params = {
       base_fine_radius_m: overrideParams.base_fine_radius_m,
       max_stretch: overrideParams.max_stretch,
+      shear_strength: overrideParams.shear_strength,
       motion_foveation_enabled: overrideParams.motion_foveation_enabled,
       collision_focus_only: overrideParams.collision_focus_only !== false,
       motion_speed_threshold_mps: overrideParams.motion_speed_threshold_mps,

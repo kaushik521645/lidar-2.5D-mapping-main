@@ -28,7 +28,13 @@ from src.ingestion.kitti_loader import KITTILoader
 from src.perception.segment import segment_points
 from src.grid.grid_engine import PolarGridEngine
 from src.grid.grid_types import VehicleState
-from src.grid.foveation import fine_radius_at_angle, BASE_FINE_RADIUS, MAX_STRETCH, SHEAR_STRENGTH
+from src.grid.foveation import (
+    fine_radius_at_angle,
+    compute_fovea_polyline,
+    BASE_FINE_RADIUS,
+    MAX_STRETCH,
+    SHEAR_STRENGTH,
+)
 from src.tracking.kalman_tracker import KalmanTrackerManager, erase_vacated_footprints
 from src.synthetic.scenarios import ScenarioGenerator
 from src.api.export_precomputed import (
@@ -38,6 +44,15 @@ from src.api.export_precomputed import (
     export_kitti_sequence,
     export_synthetic_kitti_like,
 )
+
+def _sync_load_json(file_path: str) -> Optional[Any]:
+    if not os.path.exists(file_path):
+        return None
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 app = FastAPI(title="FoveaMap Perception API", version="1.0.0")
 
@@ -119,6 +134,25 @@ async def get_configuration():
     return JSONResponse(content=load_config())
 
 
+@app.get("/api/foveation/contour")
+async def get_foveation_contour(
+    speed_mps: float = 10.0,
+    steering_angle_rad: float = 0.0,
+    base_radius_m: float = 10.0,
+    max_stretch: float = 2.5,
+    shear_strength: float = 0.6,
+):
+    """Returns 120-point foveation boundary polyline for live frontend synchronization."""
+    v_st = VehicleState(speed_mps=speed_mps, steering_angle_rad=steering_angle_rad)
+    poly = compute_fovea_polyline(
+        state=v_st,
+        base_radius=base_radius_m,
+        max_stretch=max_stretch,
+        shear_strength=shear_strength,
+    )
+    return JSONResponse(content={"polyline": poly})
+
+
 @app.get("/api/sequences")
 async def list_sequences():
     """Returns list of all available KITTI sequences with scan counts."""
@@ -173,15 +207,33 @@ async def list_scenarios():
 @app.get("/api/frames/{scenario_id}")
 async def get_scenario_frames(scenario_id: str):
     """Retrieves precomputed frame sequence for the requested scenario or sequence."""
+    def _ensure_poly(data):
+        if not isinstance(data, list):
+            return data
+        for f in data:
+            if isinstance(f, dict) and "fovea_polyline" not in f:
+                v_st = VehicleState(
+                    speed_mps=f.get("vehicle_state", {}).get("speed_mps", 10.0),
+                    steering_angle_rad=f.get("vehicle_state", {}).get("steering_angle_rad", 0.0),
+                )
+                fov_cfg = f.get("foveation_params", {})
+                f["fovea_polyline"] = compute_fovea_polyline(
+                    v_st,
+                    active_tracks=f.get("tracks", []),
+                    base_radius=fov_cfg.get("base_fine_radius_m", 10.0),
+                    max_stretch=fov_cfg.get("max_stretch", 2.5),
+                    shear_strength=fov_cfg.get("shear_strength", 0.6),
+                )
+        return data
+
     # 1. SemanticKITTI Ground-Truth Benchmark sequence
     if scenario_id in ("synthetic_kitti_like", "semantickitti", "semantic_kitti"):
         cache_file = os.path.join(PRECOMPUTED_DIR, "synthetic_kitti_like.json")
         if not os.path.exists(cache_file) or os.path.getsize(cache_file) > 100 * 1024 * 1024:
-            export_synthetic_kitti_like(output_dir=PRECOMPUTED_DIR)
-        if os.path.exists(cache_file):
-            with open(cache_file, "r") as f:
-                data = json.load(f)
-            return JSONResponse(content=data)
+            await asyncio.to_thread(export_synthetic_kitti_like, output_dir=PRECOMPUTED_DIR)
+        data = await asyncio.to_thread(_sync_load_json, cache_file)
+        if data:
+            return JSONResponse(content=_ensure_poly(data))
 
     # 2. Genuine KITTI Velodyne Odometry Sequences
     seq_match = re.search(r"(?:kitti_seq_|kitti_odometry_|kitti_|seq_)?(\d{1,2})", scenario_id, re.IGNORECASE)
@@ -202,34 +254,30 @@ async def get_scenario_frames(scenario_id: str):
         seq_str = "00"
 
     cache_file = os.path.join(PRECOMPUTED_DIR, f"{target_id}.json")
-    if os.path.exists(cache_file):
-        with open(cache_file, "r") as f:
-            data = json.load(f)
-        return JSONResponse(content=data)
+    data = await asyncio.to_thread(_sync_load_json, cache_file)
+    if data:
+        return JSONResponse(content=_ensure_poly(data))
 
     alt_cache = os.path.join(PRECOMPUTED_DIR, f"{scenario_id}.json")
-    if os.path.exists(alt_cache):
-        with open(alt_cache, "r") as f:
-            data = json.load(f)
-        return JSONResponse(content=data)
+    alt_data = await asyncio.to_thread(_sync_load_json, alt_cache)
+    if alt_data:
+        return JSONResponse(content=_ensure_poly(alt_data))
 
     # Generate on the fly for requested sequence or synthetic scenario
     if is_kitti:
-        export_kitti_sequence(sequence=seq_str, output_dir=PRECOMPUTED_DIR, max_frames=25)
-        if os.path.exists(cache_file):
-            with open(cache_file, "r") as f:
-                data = json.load(f)
-            return JSONResponse(content=data)
+        await asyncio.to_thread(export_kitti_sequence, sequence=seq_str, output_dir=PRECOMPUTED_DIR, max_frames=25)
+        data = await asyncio.to_thread(_sync_load_json, cache_file)
+        if data:
+            return JSONResponse(content=_ensure_poly(data))
         alt_seq_cache = os.path.join(PRECOMPUTED_DIR, f"kitti_seq_{seq_str}.json")
-        if os.path.exists(alt_seq_cache):
-            with open(alt_seq_cache, "r") as f:
-                data = json.load(f)
-            return JSONResponse(content=data)
+        alt_data = await asyncio.to_thread(_sync_load_json, alt_seq_cache)
+        if alt_data:
+            return JSONResponse(content=_ensure_poly(alt_data))
     else:
         scenarios = _scenario_gen.get_all_scenarios()
         if target_id in scenarios:
-            frames = process_sequence_to_json(scenarios[target_id], target_id, cache_file)
-            return JSONResponse(content=frames)
+            frames = await asyncio.to_thread(process_sequence_to_json, scenarios[target_id], target_id, cache_file)
+            return JSONResponse(content=_ensure_poly(frames))
 
     raise HTTPException(status_code=404, detail=f"Scenario '{scenario_id}' not found.")
 
@@ -367,8 +415,23 @@ async def websocket_grid_stream(websocket: WebSocket):
 
                 # Allow live speed/steering override
                 if user_override:
+                    frame_data["vehicle_state"] = dict(frame_data.get("vehicle_state", {}))
                     frame_data["vehicle_state"]["speed_mps"] = speed_mps
                     frame_data["vehicle_state"]["steering_angle_rad"] = steering_rad
+
+                if "fovea_polyline" not in frame_data or user_override:
+                    v_st = VehicleState(
+                        speed_mps=frame_data.get("vehicle_state", {}).get("speed_mps", speed_mps),
+                        steering_angle_rad=frame_data.get("vehicle_state", {}).get("steering_angle_rad", steering_rad),
+                    )
+                    fov_cfg = frame_data.get("foveation_params", {})
+                    frame_data["fovea_polyline"] = compute_fovea_polyline(
+                        v_st,
+                        active_tracks=frame_data.get("tracks", []),
+                        base_radius=fov_cfg.get("base_fine_radius_m", 10.0),
+                        max_stretch=fov_cfg.get("max_stretch", 2.5),
+                        shear_strength=fov_cfg.get("shear_strength", 0.6),
+                    )
 
                 # Enqueue with drop-oldest backpressure
                 if frame_queue.full():

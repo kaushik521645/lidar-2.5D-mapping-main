@@ -23,6 +23,24 @@ class ScenarioManager {
     return this.frames.length > 0 && this.currentFrameIdx >= this.frames.length - 1;
   }
 
+  setInCache(scenarioId, frames) {
+    if (!scenarioId || !Array.isArray(frames) || frames.length === 0) return;
+    const maxCache = 2;
+    if (this.cache.size >= maxCache && !this.cache.has(scenarioId)) {
+      for (const key of this.cache.keys()) {
+        if (key !== this.currentScenarioId) {
+          this.cache.delete(key);
+          break;
+        }
+      }
+      if (this.cache.size >= maxCache) {
+        const firstKey = this.cache.keys().next().value;
+        this.cache.delete(firstKey);
+      }
+    }
+    this.cache.set(scenarioId, frames);
+  }
+
   async prefetchScenario(scenarioId) {
     if (!scenarioId || this.cache.has(scenarioId) || this.prefetches.has(scenarioId)) {
       return;
@@ -33,7 +51,7 @@ class ScenarioManager {
         if (!response.ok) return;
         const data = await response.json();
         if (Array.isArray(data) && data.length > 0) {
-          this.cache.set(scenarioId, data);
+          this.setInCache(scenarioId, data);
         }
       } catch (e) {
         console.debug(`[ScenarioManager] Prefetch background note for ${scenarioId}:`, e);
@@ -110,7 +128,7 @@ class ScenarioManager {
       }
 
       if (Array.isArray(this.frames) && this.frames.length > 0) {
-        this.cache.set(scenarioId, this.frames);
+        this.setInCache(scenarioId, this.frames);
       }
 
       if (onProgress) onProgress(100, `Ready (${this.frames.length} frames initialized)`);

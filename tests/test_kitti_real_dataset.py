@@ -24,9 +24,9 @@ def real_kitti_loader():
 
 
 def test_real_kitti_dataset_discovery(real_kitti_loader):
-    """Verify that the zip archive is found and sequence 00 has >4,000 frames."""
-    assert os.path.exists(real_kitti_loader.dataset_path), "Dataset archive path should exist"
-    assert real_kitti_loader.is_zip, "Should identify archive as a valid zip file"
+    """Verify that the dataset is found and sequence 00 has >4,000 frames."""
+    assert os.path.exists(real_kitti_loader.dataset_path), "Dataset path should exist"
+    assert os.path.isdir(real_kitti_loader.dataset_path) or real_kitti_loader.is_zip
     assert len(real_kitti_loader) > 4000, f"Expected >4000 frames in sequence 00, got {len(real_kitti_loader)}"
 
 
@@ -117,6 +117,13 @@ def test_server_api_sequences_and_scenarios():
     assert any(s["id"] == "kitti_seq_04" for s in scenarios)
     assert "is_precomputed" in scenarios[0]
     assert isinstance(scenarios[0]["is_precomputed"], bool)
+
+    # Test foveation contour endpoint
+    f_res = client.get("/api/foveation/contour?speed_mps=12.0&steering_angle_rad=0.3&shear_strength=0.6")
+    assert f_res.status_code == 200
+    contour_data = f_res.json()
+    assert "polyline" in contour_data
+    assert len(contour_data["polyline"]) == 120
 
     # Test WebSocket auto-loop control command
     with client.websocket_connect("/ws/grid") as ws:
